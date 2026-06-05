@@ -2,6 +2,7 @@ import telebot
 import subprocess
 import sys
 import os
+import logging
 from playwright.sync_api import sync_playwright
 import re
 from dotenv import load_dotenv
@@ -9,6 +10,9 @@ import schedule
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Configuração para mostrar apenas ERROS no terminal
+logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 
 load_dotenv()
 
@@ -19,8 +23,6 @@ from acareacoes import rodar_automacao_acareacao
 from shopee import carregar_dicionario_ceps, baixar_planilha_shopee, gerar_relatorio_shopee
 from config import CHAT_ID_ALVO, BASES_ACAREACOES, BASES_SLA
 
-
-
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 bot = telebot.TeleBot(TOKEN)
 
@@ -28,15 +30,13 @@ bot = telebot.TeleBot(TOKEN)
 # FLUXO 1: RELATÓRIOS DE SLA / LATÊNCIA
 # ==============================================================
 def executar_fluxo_sla(sigla, usuario, senha, chat_id):
-    bot.send_message(chat_id, f"🚀 Iniciando extração de SLA da base {sigla}...")
-    
+    # Removidos os avisos intermediários para limpar os logs
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False) 
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
 
         try:
-            bot.send_message(chat_id, f"[{sigla}] Fazendo login na iMile...")
             page.goto("https://ds-login.imile.com/", wait_until="domcontentloaded")
             
             page.fill('input[type="text"]', str(usuario or ""))
@@ -48,11 +48,9 @@ def executar_fluxo_sla(sigla, usuario, senha, chat_id):
             try: page.locator('.close-icon').first.click(force=True)
             except: pass
 
-            bot.send_message(chat_id, f"[{sigla}] Extraindo inventário...")
             arquivo_bruto = baixar_inventario(page, sigla)
             
             if arquivo_bruto and os.path.exists(arquivo_bruto):
-                bot.send_message(chat_id, f"[{sigla}] Gerando imagens e textos...")
                 dados_telegram = gerar_prints_e_mensagens(arquivo_bruto, sigla, page)
 
                 if dados_telegram:
@@ -78,6 +76,7 @@ def executar_fluxo_sla(sigla, usuario, senha, chat_id):
 
         except Exception as e:
             bot.send_message(chat_id, f"❌ Erro crítico na base {sigla}: {e}")
+            logging.error(f"Erro no fluxo SLA para {sigla}: {e}")
         finally:
             browser.close()
 
@@ -120,7 +119,8 @@ def calcular_resumo_base(caminho_excel):
                         urgentes += 1
                 except: pass
         return total, urgentes
-    except:
+    except Exception as e:
+        logging.error(f"Erro ao calcular resumo: {e}")
         return 0, 0
 
 # ==============================================================
@@ -190,6 +190,7 @@ def extrair_kpi_comando(message):
         bot.send_message(chat_id, "✅ *KPI Atualizado com Sucesso!*\nOs dados já estão disponíveis no seu Dashboard no site.", parse_mode="Markdown")
     except Exception as e:
         bot.send_message(chat_id, f"❌ Ocorreu um erro ao extrair o KPI: {e}")
+        logging.error(f"Erro extraindo KPI: {e}")
 
 @bot.message_handler(commands=['perdas'])
 def command_perdas(message):
@@ -215,6 +216,7 @@ def command_perdas(message):
         bot.send_message(message.chat.id, msg_perdas)
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ocorreu um erro na extração completa: {e}")
+        logging.error(f"Erro em perdas: {e}")
 
 # ----------------- COMANDOS SLA (LATÊNCIA) -----------------
 @bot.message_handler(commands=['ctg'])
@@ -263,25 +265,24 @@ def command_acarea_ctp(message):
 @bot.message_handler(commands=['acarea'])
 def acarea_todas(message):
     chat_id = message.chat.id
-    bot.send_message(chat_id, "🚀 *A iniciar varredura geral (MODO TURBO)!*\nO robô vai extrair as acareações de *TODAS* as bases a rodar de 2 em 2...", parse_mode="Markdown")
+    bot.send_message(chat_id, "🚀 *A iniciar varredura geral (MODO TURBO)!*\nBuscando dados em segundo plano...", parse_mode="Markdown")
 
     bases_para_rodar = BASES_ACAREACOES
-
     resumos = {}
 
     def processar_base_manual(sigla, usuario, senha):
         if not usuario or not senha:
-            bot.send_message(chat_id, f"⚠️ Credenciais da base {sigla} ausentes no .env. A saltar...")
+            logging.error(f"Credenciais da base {sigla} ausentes no .env.")
             return sigla, None
-        bot.send_message(chat_id, f"⏳ *A iniciar base: {sigla} (Login: {usuario})*...", parse_mode="Markdown")
         try:
             caminho_file = rodar_automacao_acareacao(sigla, usuario, senha, bot, chat_id)
             return sigla, caminho_file
         except Exception as e:
             bot.send_message(chat_id, f"❌ Erro ao processar a base {sigla}: {e}")
+            logging.error(f"Erro em acarea_todas na base {sigla}: {e}")
             return sigla, None
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futuros = [executor.submit(processar_base_manual, b[0], b[1], b[2]) for b in bases_para_rodar]
         for futuro in as_completed(futuros):
             sigla, caminho_file = futuro.result()
@@ -291,15 +292,19 @@ def acarea_todas(message):
             else:
                 resumos[sigla] = {"total": 0, "urgentes": 0}
 
+    # Ordenar por maior quantidade de acareações totais
+    itens_ordenados = sorted(resumos.items(), key=lambda item: item[1]['total'], reverse=True)
+
     msg_analistas = "📊 *CONSOLIDADO DE ACAREAÇÕES POR BASE* 📊\n━━━━━━━━━━━━━━━━━━━━━━\nOlá equipa, segue o balanço pendente:\n\n"
     total_rede = 0
-    for sigla in [b[0] for b in bases_para_rodar]:
-        if sigla in resumos:
-            tot = resumos[sigla]["total"]
-            urg = resumos[sigla]["urgentes"]
-            total_rede += tot
-            txt_urg = f"_(🚨 {urg} CRÍTICOS < 5H)_" if urg > 0 else "_(✅ Sem urgências)_"
-            msg_analistas += f"🏢 *{sigla}:* {tot} pacote(s) {txt_urg}\n"
+    
+    for sigla, dados in itens_ordenados:
+        tot = dados["total"]
+        urg = dados["urgentes"]
+        total_rede += tot
+        txt_urg = f"_(🚨 {urg} CRÍTICOS < 5H)_" if urg > 0 else "_(✅ Sem urgências)_"
+        msg_analistas += f"🏢 *{sigla}:* {tot} pacote(s) {txt_urg}\n"
+        
     msg_analistas += f"━━━━━━━━━━━━━━━━━━━━━━\n📦 *TOTAL DA REDE:* {total_rede} acareações pendentes."
     bot.send_message(chat_id, msg_analistas, parse_mode="Markdown")
 
@@ -311,18 +316,18 @@ def rotina_automatica_acareacoes():
     bot.send_message(CHAT_ID_ALVO, "⏰ *HORÁRIO ATINGIDO! Iniciando varredura automática (Modo Turbo)*", parse_mode="Markdown")
     
     bases_para_rodar = BASES_ACAREACOES
-
     resumos = {}
+    
     def processar_base_auto(sigla, usuario, senha):
         if not usuario or not senha: return sigla, None
-        bot.send_message(CHAT_ID_ALVO, f"⏳ *Iniciando base: {sigla} (Login: {usuario})*...", parse_mode="Markdown")
         try:
             caminho_file = rodar_automacao_acareacao(sigla, usuario, senha, bot, CHAT_ID_ALVO)
             return sigla, caminho_file
-        except:
+        except Exception as e:
+            logging.error(f"Erro em rotina_automatica_acareacoes na base {sigla}: {e}")
             return sigla, None
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futuros = [executor.submit(processar_base_auto, b[0], b[1], b[2]) for b in bases_para_rodar]
         for futuro in as_completed(futuros):
             sigla, caminho_file = futuro.result()
@@ -332,15 +337,19 @@ def rotina_automatica_acareacoes():
             else:
                 resumos[sigla] = {"total": 0, "urgentes": 0}
 
+    # Ordenar por maior quantidade de acareações totais
+    itens_ordenados = sorted(resumos.items(), key=lambda item: item[1]['total'], reverse=True)
+
     msg_analistas = "📊 *CONSOLIDADO (AUTOMÁTICO)* 📊\n━━━━━━━━━━━━━━━━━━━━━━\nBalanço pendente:\n\n"
     total_rede = 0
-    for sigla in [b[0] for b in bases_para_rodar]:
-        if sigla in resumos:
-            tot = resumos[sigla]["total"]
-            urg = resumos[sigla]["urgentes"]
-            total_rede += tot
-            txt_urg = f"_(🚨 {urg} CRÍTICOS < 5H)_" if urg > 0 else "_(✅ Sem urgências)_"
-            msg_analistas += f"🏢 *{sigla}:* {tot} pacote(s) {txt_urg}\n"
+    
+    for sigla, dados in itens_ordenados:
+        tot = dados["total"]
+        urg = dados["urgentes"]
+        total_rede += tot
+        txt_urg = f"_(🚨 {urg} CRÍTICOS < 5H)_" if urg > 0 else "_(✅ Sem urgências)_"
+        msg_analistas += f"🏢 *{sigla}:* {tot} pacote(s) {txt_urg}\n"
+        
     msg_analistas += f"━━━━━━━━━━━━━━━━━━━━━━\n📦 *TOTAL DA REDE:* {total_rede} acareações."
     bot.send_message(CHAT_ID_ALVO, msg_analistas, parse_mode="Markdown")
 
@@ -352,9 +361,11 @@ def rotina_automatica_sla():
     def processar_sla_auto(sigla, usuario, senha):
         if not usuario or not senha: return
         try: executar_fluxo_sla(sigla, usuario, senha, CHAT_ID_ALVO)
-        except Exception as e: bot.send_message(CHAT_ID_ALVO, f"❌ Erro SLA {sigla}: {e}")
+        except Exception as e: 
+            bot.send_message(CHAT_ID_ALVO, f"❌ Erro SLA {sigla}: {e}")
+            logging.error(f"Erro SLA auto {sigla}: {e}")
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futuros = [executor.submit(processar_sla_auto, b[0], b[1], b[2]) for b in bases_sla]
         for futuro in as_completed(futuros): pass
 
@@ -381,7 +392,6 @@ schedule.every().day.at("23:12").do(rotina_automatica_sla)
 # INICIALIZAÇÃO (SEMPRE AQUI NO FINAL)
 # ==============================================================
 threading.Thread(target=relogio_do_bot, daemon=True).start()
-print("⏰ Relógio interno ativado! Rotinas agendadas.")
-print("🤖 Bot iniciado e aguardando comandos manuais...")
+logging.error("⏰ Bot iniciado! (Mostrando apenas erros a partir de agora)")
 
 bot.infinity_polling()
