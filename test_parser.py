@@ -1,0 +1,58 @@
+import json
+from bs4 import BeautifulSoup
+
+html = '''<div class="ImileProPageTableBox-root l-hlpp4y"><div class="imile-table-wrapper l-1mfiubt css-whjcj4"><div class="imile-spin-nested-loading css-whjcj4"><div class="imile-spin-container"><div class="imile-table css-whjcj4 imile-table-ping-right imile-table-fixed-header imile-table-fixed-column imile-table-scroll-horizontal imile-table-has-fix-left imile-table-has-fix-right"><div class="imile-table-container"><div class="imile-table-header" style="overflow: hidden;"><table style="table-layout: fixed;"><colgroup><col class="imile-table-selection-col" style="width: 32px;"><col style="width: 35px;"><col style="width: 130px;"><col style="width: 130px;"><col style="width: 100px;"><col style="width: 260px;"><col style="width: 90px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 120px;"><col style="width: 120px;"><col style="width: 120px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 120px;"><col style="width: 100px;"><col style="width: 120px;"><col style="width: 100px;"><col style="width: 60px;"><col style="width: 14px;"></colgroup><thead class="imile-table-thead"><tr><th class="imile-table-cell imile-table-selection-column imile-table-cell-fix-left" scope="col" style="position: sticky; left: 0px;"><div class="imile-table-selection"><label class="imile-checkbox-wrapper"><span class="imile-checkbox"><input type="checkbox" class="imile-checkbox-input" value=""><span class="imile-checkbox-inner"></span></span></label></div></th><th class="imile-table-cell imile-table-cell-fix-left imile-table-cell-ellipsis" scope="col" style="position: sticky; left: 32px;"><div class="ImileBox-root l-70qvj9"><div class="ImileEllipsis-root l-1nw2nnq">#</div></div></th><th class="imile-table-cell imile-table-cell-fix-left" scope="col" style="position: sticky; left: 67px;"><div class="ImileBox-root l-70qvj9"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-dsvo1" aria-label="Reclamation Ticket No.">Reclamation Ticket No.</div><div class="ImileSvgIcon-root ImileSvgIcon-fontSizeInherit l-1pckmpe" focusable="false" aria-hidden="true" viewBox="0 0 1024 1024"><path d="M811.239328 359.882414v-276.536137h-598.477611v276.536137l299.239328 299.238304 299.238304-299.238304z m-598.477611 304.225528v276.536137h598.477611V664.107942L511.999496 364.87066 212.761717 664.107942z"></path></div></div></th><th class="imile-table-cell imile-table-cell-fix-left imile-table-cell-fix-left-last" scope="col" style="position: sticky; left: 197px;"><div class="ImileBox-root l-70qvj9"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-dsvo1" aria-label="AWB relacionado">AWB relacionado</div></div></th><th class="imile-table-cell" scope="col"><div class="ImileBox-root l-70qvj9"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-304f16" aria-label="Status de reabertura">Status de reabertura</div></div></th><th class="imile-table-cell" scope="col"><div class="ImileBox-root l-70qvj9"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-304f16" aria-label="Número do ticket pai/filho">Número do ticket pai/filho</div></div></th><th class="imile-table-cell" scope="col"><div class="ImileBox-root l-70qvj9"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-12ob533" aria-label="Criar Tempo">Criar Tempo</div><div class="imile-table-column-sorter imile-table-column-sorter-full"><span class="imile-table-column-sorter-inner" aria-hidden="true"><span role="img" aria-label="caret-up" class="imileicon imileicon-caret-up imile-table-column-sorter-up"><svg viewBox="0 0 1024 1024" focusable="false" data-icon="caret-up" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M858.9 689L530.5 308.2c-9.4-10.9-27.5-10.9-37 0L165.1 689c-12.2 14.2-1.2 35 18.5 35h656.8c19.7 0 30.7-20.8 18.5-35z"></path></svg></span><span role="img" aria-label="caret-down" class="imileicon imileicon-caret-down imile-table-column-sorter-down"><svg viewBox="0 0 1024 1024" focusable="false" data-icon="caret-down" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M840.4 300H183.6c-19.7 0-30.7 20.8-18.5 35l328.4 380.8c9.4 10.9 27.5 10.9 37 0L858.9 335c12.2-14.2 1.2-35-18.5-35z"></path></svg></span></span></div></div></th><th class="imile-table-cell" scope="col"><div class="ImileBox-root l-70qvj9"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-304f16" aria-label="Estado do Tratamento">Estado do Tratamento</div></div></th><th class="imile-table-cell" scope="col"><div class="ImileBox-root l-70qvj9"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-304f16" aria-label="Prazo do Processo">Prazo do Processo</div><div class="imile-table-column-sorter imile-table-column-sorter-full"><span class="imile-table-column-sorter-inner" aria-hidden="true"><span role="img" aria-label="caret-up" class="imileicon imileicon-caret-up imile-table-column-sorter-up"><svg viewBox="0 0 1024 1024" focusable="false" data-icon="caret-up" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M858.9 689L530.5 308.2c-9.4-10.9-27.5-10.9-37 0L165.1 689c-12.2 14.2-1.2 35 18.5 35h656.8c19.7 0 30.7-20.8 18.5-35z"></path></svg></span><span role="img" aria-label="caret-down" class="imileicon imileicon-caret-down imile-table-column-sorter-down"><svg viewBox="0 0 1024 1024" focusable="false" data-icon="caret-down" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M840.4 300H183.6c-19.7 0-30.7 20.8-18.5 35l328.4 380.8c9.4 10.9 27.5 10.9 37 0L858.9 335c12.2-14.2 1.2-35-18.5-35z"></path></svg></span></span></div></div></th><th class="imile-table-cell" scope="col"><div class="ImileBox-root l-70qvj9"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-304f16" aria-label="Estação de Tratamento">Estação de Tratamento</div></div></th><th class="imile-table-cell" scope="col"><div class="ImileBox-root l-70qvj9"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-304f16" aria-label="Tipo Principal do Bilhete">Tipo Principal do Bilhete</div></div></th><th class="imile-table-cell" scope="col"><div class="ImileBox-root l-70qvj9"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-304f16" aria-label="Subtipo de Bilhete">Subtipo de Bilhete</div></div></th></tr></thead></table></div><div class="imile-table-body" style="overflow: auto scroll; max-height: 637px;"><table style="width: 0px; min-width: 100%; table-layout: fixed;"><colgroup><col class="imile-table-selection-col" style="width: 32px;"><col style="width: 35px;"><col style="width: 130px;"><col style="width: 130px;"><col style="width: 100px;"><col style="width: 260px;"><col style="width: 90px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"><col style="width: 100px;"></colgroup><tbody class="imile-table-tbody"><tr class="imile-table-row imile-table-row-level-0" data-row-key="1521699781242736641"><td class="imile-table-cell imile-table-selection-column imile-table-cell-fix-left" style="position: sticky; left: 0px;"><label class="imile-checkbox-wrapper"><span class="imile-checkbox"><input type="checkbox" class="imile-checkbox-input" value=""><span class="imile-checkbox-inner"></span></span></label></td><td class="imile-table-cell imile-table-cell-fix-left imile-table-cell-ellipsis" title="1" style="position: sticky; left: 32px;">1</td><td class="imile-table-cell imile-table-cell-fix-left" style="position: sticky; left: 67px;"><div class="ImileEllipsis-root l-17twtoz">T2107075157901</div></td><td class="imile-table-cell imile-table-cell-fix-left imile-table-cell-fix-left-last" style="position: sticky; left: 197px;"><div class="ImileEllipsis-root l-17twtoz">3320069948689</div></td><td class="imile-table-cell"><span class="inline-flex items-center gap-1 whitespace-nowrap" data-restart-role="none"><span class="shrink-0 border inline-flex items-center justify-center rounded-full leading-none w-2 h-2" style="border-color: rgba(222, 222, 222, 0.4); background-color: rgb(222, 222, 222);"></span><span>Não reaberto</span></span></td><td class="imile-table-cell"><span>-</span></td><td class="imile-table-cell"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-sjs9uq" aria-label="2026-09-09 11:37:38">2026-09-09 11:37:38</div></td><td class="imile-table-cell"><div class="ImileEllipsis-root l-sjs9uq">Processing</div></td><td class="imile-table-cell"><div class="ImileEllipsis-root l-sjs9uq">2026-09-09 14:00:00</div></td><td class="imile-table-cell"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-sjs9uq" aria-label="MNT-Station">MNT-Station</div></td><td class="imile-table-cell"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-sjs9uq" aria-label="Abnormal Package">Abnormal Package</div></td><td class="imile-table-cell"><div class="ImileEllipsis-root ImileEllipsis-hasTip l-sjs9uq" aria-label="Acareação">Acareação</div></td></tr></tbody></table></div>'''
+
+soup = BeautifulSoup(html, "html.parser")
+
+headers = [h.get_text(strip=True) for h in soup.select("thead th")]
+print("Headers:", headers)
+
+awbIndex = -1
+prazoIndex = -1
+statusIndex = -1
+subTypeIndex = -1
+
+for i, h in enumerate(headers):
+    if "Related AWB" in h or "Waybill" in h or "AWB relacionado" in h:
+        awbIndex = i
+    if "Deadline Process Time" in h or "Prazo do Processo" in h:
+        prazoIndex = i
+    if "Handling Status" in h or "Status" in h or "Estado do Tratamento" in h:
+        statusIndex = i
+    if "Ticket Sub Type" in h or "Sub Type" in h or "Subtipo de Bilhete" in h or "Subtipo" in h:
+        subTypeIndex = i
+
+print(f"Indices -> AWB: {awbIndex}, Prazo: {prazoIndex}, Status: {statusIndex}, SubType: {subTypeIndex}")
+
+rows = soup.select("tr.imile-table-row")
+print(f"Total rows found: {len(rows)}")
+
+itens = []
+for row in rows:
+    cells = [td.get_text(strip=True) for td in row.select("td")]
+    
+    status = ""
+    if statusIndex >= 0 and statusIndex < len(cells):
+        status = cells[statusIndex]
+    else:
+        status = "Processing" if "Processing" in cells else ""
+
+    if status == "Processing":
+        codigo = ""
+        prazo = "N/A"
+        sub_tipo = "N/A"
+
+        if awbIndex >= 0 and awbIndex < len(cells):
+            codigo = cells[awbIndex]
+        
+        if prazoIndex >= 0 and prazoIndex < len(cells):
+            prazo = cells[prazoIndex]
+        
+        if subTypeIndex >= 0 and subTypeIndex < len(cells):
+            sub_tipo = cells[subTypeIndex]
+        
+        itens.append({"codigo": codigo, "prazo": prazo, "sub_tipo": sub_tipo})
+
+print("Items found:", len(itens))
+print(json.dumps(itens, indent=2))

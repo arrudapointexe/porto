@@ -10,6 +10,7 @@ import base64
 import requests
 from datetime import datetime, timedelta
 import plotly.express as px
+import sync_time_patch  # Fix Google Auth time offset
 
 # ==============================================================
 # CONFIGURAÇÃO DA PÁGINA (Deve ser a primeira linha do Streamlit)
@@ -24,11 +25,13 @@ try:
     NUMERO_BASE_CTG = st.secrets.get("NUMERO_BASE_CTG", NUMERO_BASE) 
     NOME_PLANILHA = st.secrets.get("NOME_PLANILHA", "acareaBase")
     URL_WEBHOOK_DRIVE = st.secrets.get("URL_WEBHOOK_DRIVE", "")
+    URL_SITE = st.secrets.get("URL_SITE", "https://imileacarea.streamlit.app")
 except:
     NUMERO_BASE = os.getenv("NUMERO_BASE", "5531971463005")
     NUMERO_BASE_CTG = os.getenv("NUMERO_BASE_CTG", NUMERO_BASE)
     NOME_PLANILHA = os.getenv("NOME_PLANILHA", "acareaBase")
     URL_WEBHOOK_DRIVE = os.getenv("URL_WEBHOOK_DRIVE", "")
+    URL_SITE = os.getenv("URL_SITE", "https://imileacarea.streamlit.app")
 
 # 🔥 CORREÇÃO 1: As 11 bases da rede em ordem alfabética
 BASES_DISPONIVEIS = ["CPH", "CTG", "CTP", "GNH", "GVR", "ITR", "JML", "MNT", "QHG", "RBN", "TFO"]
@@ -199,11 +202,14 @@ if menu == "📷 Portal do Motorista":
                             if len(tel_cliente) >= 10: tel_cliente = '55' + tel_cliente
                             else: tel_cliente = ''
 
+                            bairro = str(row.get('Bairro', 'N/A')).strip()
                             msg_cliente = (
                                 f"Olá, somos uma transportadora parceira (SHEIN/TIKTOK)\n\n"
                                 f"{row['Nome']}, poderia confirmar o recebimento da mercadoria com os dados abaixo:\n"
                                 f"Código do pacote: {row['AWB']}\n"
-                                f"Endereço: {row.get('Endereco', 'N/A')}\n\n"
+                                f"Endereço: {row.get('Endereco', 'N/A')}\n"
+                                f"Bairro: {bairro}\n"
+                                f"Telefone: {tel_bruto}\n\n"
                                 f"Produto: {row.get('Produto', 'N/A')}\n\n"
                                 f"Confirma o Recebimento do produto? SIM OU NÃO"
                             )
@@ -397,24 +403,28 @@ elif menu == "💬 Gerador de Mensagens":
                     produto = str(linha.get('Produto', 'N/A')).strip()
                     telefone = str(linha.get('Telefone', 'N/A')).strip()
                     nome_cliente = str(linha.get('Nome', 'Cliente')).strip()
+                    valor = str(linha.get('Valor', '0.00')).strip()
+                    endereco = str(linha.get('Endereco', 'N/A')).strip()
                     
-                    texto_gerado = f"""Boa tarde! Segue acareação iMile:
+                    texto_gerado = f"""🚨 *Acareação iMile Pendente* 🚨
 
-Código do pedido: {awb_selecionado}
-Produto: {produto}
-Telefone: {telefone}
+📦 *Código:* {awb_selecionado}
+🏷️ *Produto:* {produto}
+💰 *Valor:* R$ {valor}
+📞 *Telefone:* {telefone}
+📍 *Endereço:* {endereco}
 
-Finalizar até: {prazo_texto}
+⏰ *FINALIZAR ATÉ:* {prazo_texto}
 
-Você pode responder as acareações com um print com a conversa com o cliente confirmando o recebimento (incluindo código do pedido, nome e telefone do mesmo, o contato não pode estar salvo e o telefone tem que ser o mesmo do sistema) ou protocolo de acareação por escrito preenchendo todos os dados corretamente (tenho impresso, pegar na base). O cabeçalho NÃO pode ser preenchido pelo cliente, pra não ficar tudo com a mesma letra, e uma foto da fachada da casa. 
+*Como responder esta acareação:*
+Acesse o portal do motorista pelo link abaixo e envie o seu comprovante (print ou foto do protocolo):
+🌐 *Link do Portal:* {URL_SITE}/?base={base_atual}
 
-Caso não seja respondido dentro do prazo, ela irá extraviar em seu nome + multa de R$100,00 reais por baixa fake.
-(CASO NÃO SEJA RESPONDIDA NO PRAZO DA FORMA CORRETA, SERÁ DESCONTADO)
+*Regras para o Comprovante:*
+1️⃣ *Print do WhatsApp:* A conversa com o cliente deve confirmar o recebimento (com código do pedido, nome e telefone). O contato NÃO pode estar salvo na sua agenda e o número deve ser o mesmo do sistema.
+2️⃣ *Protocolo Escrito:* Preencha todos os dados corretamente (pegue impresso na base). O cabeçalho NÃO pode ser preenchido pelo cliente. É obrigatória uma foto da folha do protocolo e outra da folha com a fachada atrás.
 
-Exemplo de como mandar mensagem:
-
-Oi, boa tarde {nome_cliente}, sou o entregador, gostaria de confirmar o recebimento de sua mercadoria com o código {awb_selecionado}.
-Produto: {produto}"""
+⚠️ *ATENÇÃO:* Caso não seja respondido no prazo e da forma correta, o pacote será dado como extraviado em seu nome + MULTA de R$100,00 por baixa indevida. O valor será descontado!"""
 
                     st.markdown("### 📋 Texto Pronto para Copiar")
                     st.code(texto_gerado, language="text")

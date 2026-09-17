@@ -13,7 +13,101 @@ load_dotenv()
 
 NOME_PLANILHA = os.getenv("NOME_PLANILHA", "acareaBase")
 
-def enviar_para_google_sheets(df_final, sigla, bot=None, chat_id=None):
+
+def normalizar_codigo(codigo):
+    return str(codigo or "").strip().replace(" ", "")
+
+
+def extrair_awbs_da_planilha(valores):
+    awbs = set()
+    if not valores:
+        return awbs
+
+    for row in valores:
+        if not row:
+            continue
+
+        primeira_celula = str(row[0]).strip()
+        if not primeira_celula:
+            continue
+
+        valor_normalizado = primeira_celula.lower()
+        if valor_normalizado in {"awb", "waybill", "codigo", "código", "tracking", "tracking number", "motorista", "nome", "telefone", "endereço", "produto", "valor", "prazo do processo", "subtipo"}:
+            continue
+
+        awbs.add(normalizar_codigo(primeira_celula))
+
+    return awbs
+
+
+def filtrar_itens_novos(itens, awbs_existentes):
+    awbs_existentes_norm = {normalizar_codigo(awb) for awb in awbs_existentes}
+    itens_novos = []
+    vistos = set()
+
+    for item in itens:
+        codigo = normalizar_codigo(item.get("codigo", ""))
+        if not codigo or codigo in awbs_existentes_norm or codigo in vistos:
+            continue
+
+        vistos.add(codigo)
+        itens_novos.append(item)
+
+    return itens_novos
+
+
+def remover_awbs_ausentes_da_planilha(valores, awbs_ativos):
+    if not valores:
+        return valores
+
+    awbs_ativos_norm = {normalizar_codigo(awb) for awb in awbs_ativos}
+    linhas_filtradas = []
+
+    for row in valores:
+        if not row:
+            continue
+
+        primeira_celula = str(row[0]).strip()
+        if not primeira_celula:
+            linhas_filtradas.append(row)
+            continue
+
+        valor_normalizado = primeira_celula.lower()
+        if valor_normalizado in {"awb", "waybill", "codigo", "código", "tracking", "tracking number", "motorista", "nome", "telefone", "endereço", "produto", "valor", "prazo do processo", "subtipo"}:
+            linhas_filtradas.append(row)
+            continue
+
+        if normalizar_codigo(primeira_celula) in awbs_ativos_norm:
+            linhas_filtradas.append(row)
+
+    return linhas_filtradas
+
+
+def sincronizar_linhas_da_planilha(linhas_existentes, dados_para_nuvem, awbs_ativos):
+    if not linhas_existentes:
+        return dados_para_nuvem
+
+    linhas_ativas = remover_awbs_ausentes_da_planilha(linhas_existentes, awbs_ativos)
+    linhas_finais = []
+
+    if linhas_ativas:
+        linhas_finais.append(linhas_ativas[0])
+        linhas_finais.extend(linhas_ativas[1:])
+    else:
+        linhas_finais.append(dados_para_nuvem[0])
+
+    if dados_para_nuvem[1:]:
+        for linha in dados_para_nuvem[1:]:
+            if not linha:
+                continue
+            codigo = normalizar_codigo(linha[0])
+            if codigo and codigo not in {normalizar_codigo(item[0]) for item in linhas_finais[1:] if item and item[0]}:
+                linhas_finais.append(linha)
+
+    return linhas_finais
+
+
+def enviar_para_google_sheets(df_final, sigla, bot=None, chat_id=None, awbs_ativos=None):
     msg = f"☁️ Enviando dados para a aba {sigla} no Google Sheets..."
     print(msg)
     if bot and chat_id: bot.send_message(chat_id, msg)
@@ -33,11 +127,19 @@ def enviar_para_google_sheets(df_final, sigla, bot=None, chat_id=None):
                 if bot and chat_id: bot.send_message(chat_id, msg_nova_aba)
                 planilha = planilha_mestre.add_worksheet(title=sigla, rows="1000", cols="20")
             
-            planilha.clear()
             dados_para_nuvem = [df_final.columns.values.tolist()] + df_final.fillna("").values.tolist()
-            planilha.update('A1', dados_para_nuvem)
+            linhas_existentes = planilha.get_all_values()
+            awbs_ativos_norm = {normalizar_codigo(awb) for awb in (awbs_ativos or set())}
+
+            if not linhas_existentes:
+                planilha.update('A1', dados_para_nuvem)
+            else:
+                linhas_finais = sincronizar_linhas_da_planilha(linhas_existentes, dados_para_nuvem, awbs_ativos_norm)
+                planilha.clear()
+                if linhas_finais:
+                    planilha.update('A1', linhas_finais)
             
-            msg_sucesso = f"✅ SUCESSO! Dados da base {sigla} atualizados na nuvem."
+            msg_sucesso = f"✅ SUCESSO! Dados da base {sigla} sincronizados na nuvem."
             print(msg_sucesso)
             if bot and chat_id: bot.send_message(chat_id, msg_sucesso)
             return  # Se deu certo, sai da função
@@ -53,7 +155,11 @@ def enviar_para_google_sheets(df_final, sigla, bot=None, chat_id=None):
     if bot and chat_id: bot.send_message(chat_id, msg_falha)
 
 
-def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None):
+def rodar_automacao_acareacao_incremental(sigla, usuario, senha, bot=None, chat_id=None):
+    return rodar_automacao_acareacao(sigla, usuario, senha, bot, chat_id, modo_incremental=True)
+
+
+def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None, modo_incremental=False):
     
     def log(msg):
         texto = f"[{sigla} - Acareação] {msg}"
@@ -121,57 +227,65 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None):
             codigos_prazos = []
             for index, frame in enumerate(page.frames):
                 try:
-                    if "Ticket" in frame.content():
+                    if "Ticket" in frame.content() or "ticket" in frame.content() or "Reclama" in frame.content() or "AWB" in frame.content():
                         res = frame.evaluate(r'''() => {
-                            const itens = [];
-                            const rows = document.querySelectorAll("tr.imile-table-row");
-                            const headers = Array.from(document.querySelectorAll("thead th")).map(h => h.innerText.trim());
+                            try {
+                                const itens = [];
+                                const rows = document.querySelectorAll("tbody tr");
+                                const headers = Array.from(document.querySelectorAll("thead th")).map(h => h.textContent.trim());
 
-                            const awbIndex = headers.findIndex(h => h.includes("Related AWB") || h.includes("Waybill"));
-                            const prazoIndex = headers.findIndex(h => h.includes("Deadline Process Time"));
-                            const statusIndex = headers.findIndex(h => h.includes("Handling Status") || h.includes("Status"));
-                            // 👇 NOVO: Buscando a coluna de Subtipo
-                            const subTypeIndex = headers.findIndex(h => h.includes("Ticket Sub Type") || h.includes("Sub Type"));
+                                const awbIndex = headers.findIndex(h => h.includes("Related AWB") || h.includes("Waybill") || h.includes("AWB"));
+                                const prazoIndex = headers.findIndex(h => h.includes("Deadline Process Time") || h.includes("Prazo"));
+                                const statusIndex = headers.findIndex(h => h.includes("Handling Status") || h.includes("Status") || h.includes("Estado"));
+                                const subTypeIndex = headers.findIndex(h => h.includes("Ticket Sub Type") || h.includes("Sub Type") || h.includes("Subtipo"));
 
-                            rows.forEach(row => {
-                                const cells = Array.from(row.querySelectorAll("td"));
-                                if (!cells || cells.length === 0) return;
+                                rows.forEach(row => {
+                                    const cells = Array.from(row.querySelectorAll("td"));
+                                    if (!cells || cells.length === 0) return;
 
-                                let status = "";
-                                if (statusIndex >= 0 && cells[statusIndex]) {
-                                    status = cells[statusIndex].innerText.trim();
-                                } else {
-                                    status = cells.map(c => c.innerText.trim()).includes("Processing") ? "Processing" : "";
-                                }
-
-                                if (status === "Processing") {
-                                    let codigo = "";
-                                    let prazo = "N/A";
-                                    let sub_tipo = "N/A";
-
-                                    if (awbIndex >= 0 && cells[awbIndex]) {
-                                        codigo = cells[awbIndex].innerText.trim();
-                                    } else {
-                                        const match = cells.map(c => c.innerText.trim()).join(' ').match(/\b\d{13,15}\b/);
-                                        if (match) codigo = match[0];
+                                    let status = "";
+                                    if (statusIndex >= 0 && cells[statusIndex]) {
+                                        status = cells[statusIndex].textContent.trim();
+                                    }
+                                    if (!status || !status.includes("Processing")) {
+                                        status = cells.some(c => c.textContent.trim().includes("Processing")) ? "Processing" : status;
                                     }
 
-                                    if (prazoIndex >= 0 && cells[prazoIndex]) {
-                                        prazo = cells[prazoIndex].innerText.trim();
-                                    }
-                                    
-                                    // 👇 NOVO: Extraindo o texto do Subtipo
-                                    if (subTypeIndex >= 0 && cells[subTypeIndex]) {
-                                        sub_tipo = cells[subTypeIndex].innerText.trim();
-                                    }
+                                    if (status.includes("Processing")) {
+                                        let codigo = "";
+                                        let prazo = "N/A";
+                                        let sub_tipo = "N/A";
 
-                                    // 👇 ATUALIZADO: Guardando o subtipo junto com o AWB
-                                    if (codigo) itens.push({ codigo, prazo, sub_tipo });
-                                }
-                            });
-                            return itens;
+                                        if (awbIndex >= 0 && cells[awbIndex]) {
+                                            codigo = cells[awbIndex].textContent.trim();
+                                        } 
+                                        
+                                        // Fallback robusto se codigo estiver vazio ou apenas espacos
+                                        if (!codigo || codigo.length < 5) {
+                                            const match = cells.map(c => c.textContent.trim()).join(' ').match(/\b\d{13,15}\b/);
+                                            if (match) codigo = match[0];
+                                        }
+
+                                        if (prazoIndex >= 0 && cells[prazoIndex]) {
+                                            prazo = cells[prazoIndex].textContent.trim();
+                                        }
+                                        
+                                        if (subTypeIndex >= 0 && cells[subTypeIndex]) {
+                                            sub_tipo = cells[subTypeIndex].textContent.trim();
+                                        }
+
+                                        if (codigo) itens.push({ codigo, prazo, sub_tipo });
+                                    }
+                                });
+                                return { sucesso: true, itens: itens };
+                            } catch(e) {
+                                return { sucesso: false, error: e.message };
+                            }
                         }''')
-                        if res: codigos_prazos.extend(res)
+                        if res and res.get('sucesso'): 
+                            codigos_prazos.extend(res.get('itens', []))
+                        elif res and not res.get('sucesso'):
+                            log(f"⚠️ Erro ao extrair dados no JS: {res.get('error')}")
                 except: continue
 
             codigos_map = {}
@@ -182,10 +296,30 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None):
             codigos_finais = list(codigos_map.values())
             log(f"Total de códigos Processing capturados: {len(codigos_finais)}")
 
-            if not codigos_finais:
-                log("Nenhum código para detalhar. Finalizando...")
-                browser.close()
-                return None
+            if modo_incremental:
+                try:
+                    cliente = get_gspread_client()
+                    planilha_mestre = cliente.open(NOME_PLANILHA)
+                    try:
+                        planilha = planilha_mestre.worksheet(sigla)
+                    except gspread.exceptions.WorksheetNotFound:
+                        planilha = planilha_mestre.add_worksheet(title=sigla, rows="1000", cols="20")
+
+                    awbs_existentes = extrair_awbs_da_planilha(planilha.get_all_values())
+                except Exception as e:
+                    log(f"Não foi possível consultar a planilha para filtrar itens já existentes: {e}")
+                    awbs_existentes = set()
+
+                awbs_ativos = {normalizar_codigo(item.get("codigo", "")) for item in codigos_finais}
+                codigos_finais = filtrar_itens_novos(codigos_finais, awbs_existentes)
+                log(f"Códigos novos para detalhar após checagem na planilha: {len(codigos_finais)}")
+
+                if not codigos_finais:
+                    log("Nenhum código novo para detalhar. Finalizando sem gastar descriptografia adicional...")
+                    browser.close()
+                    return None
+            else:
+                awbs_ativos = {normalizar_codigo(item.get("codigo", "")) for item in codigos_finais}
 
             log("Iniciando consultas detalhadas (isso pode demorar um pouco)...")
             page.goto("https://ds.imile.com/#/DSOperation/WaybillManagement/dsTrackQuery", wait_until="domcontentloaded")
@@ -201,10 +335,10 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None):
                 for _ in range(10):
                     for f in page.frames:
                         try:
-                            el = f.locator('.search-input input, input[placeholder*="insira"]').first
+                            el = f.locator('.search-input input, input[placeholder*="insira"], input[placeholder*="Please"], input[placeholder*="please"], textarea').first
                             if el.is_visible(timeout=500):
                                 el.fill(str(codigo))
-                                f.locator('.search-btn, button:has-text("Pesquisar")').first.click(force=True)
+                                f.locator('.search-btn, button:has-text("Pesquisar"), button:has-text("Search"), button:has-text("Query")').first.click(force=True)
                                 target_f = f
                                 break
                         except: continue
@@ -214,19 +348,19 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None):
                 if target_f:
                     page.wait_for_timeout(3000)
                     
-                    try: target_f.get_by_role("tab", name="CUSTOMER INFO").first.click(force=True)
+                    try: target_f.get_by_role("tab", name=re.compile(r"CUSTOMER INFO|INFORMAÇÕES DO CLIENTE", re.IGNORECASE)).first.click(force=True)
                     except: pass
                     page.wait_for_timeout(1000) 
                     
                     try: 
-                        olho = target_f.locator('.detail-item', has_text="Customer Name").locator('svg, [role="button"]').first
+                        olho = target_f.locator('.detail-item', has_text=re.compile(r"Customer Name|Nome do Cliente", re.IGNORECASE)).locator('svg, [role="button"]').first
                         if olho.is_visible(timeout=1000):
                             olho.click(force=True)
                             page.wait_for_timeout(1500)
                     except: pass
 
                     try: 
-                        olho_tel = target_f.locator('.detail-item', has_text="Customer phone").locator('svg, [role="button"]').first
+                        olho_tel = target_f.locator('.detail-item', has_text=re.compile(r"Customer phone|Telefone do Cliente|Telefone", re.IGNORECASE)).locator('svg, [role="button"]').first
                         if olho_tel.is_visible(timeout=1000):
                             olho_tel.click(force=True)
                             page.wait_for_timeout(1500)
@@ -234,27 +368,37 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None):
                     
                     dados_cli = target_f.evaluate('''() => {
                         const buscar = (t) => {
+                            const termos = t.split("|").map(s => s.trim().toLowerCase());
                             const items = Array.from(document.querySelectorAll('.detail-item'));
-                            const found = items.find(i => i.innerText.includes(t));
+                            const found = items.find(i => {
+                                const text = i.innerText.toLowerCase();
+                                return termos.some(termo => text.includes(termo));
+                            });
                             return found ? found.querySelector('.value').innerText.replace("****", "").trim() : "N/A";
                         };
-                        return { nome: buscar("Customer Name"), tel: buscar("Customer phone"), end: buscar("Address"), bairro: buscar("Customer District"), cidade: buscar("Recipient City") };
+                        return {
+                            nome: buscar("Customer Name|Nome do Cliente"),
+                            tel: buscar("Customer phone|Telefone do Cliente"),
+                            end: buscar("Address|Endereço"),
+                            bairro: buscar("Customer District|Bairro"),
+                            cidade: buscar("Recipient City|Cidade do Destinatário")
+                        };
                     }''')
 
                     try:
-                        try: target_f.get_by_role("tab", name="PRODUCT INFO").first.click(force=True)
-                        except: target_f.get_by_text("PRODUCT INFO").first.click(force=True)
+                        try: target_f.get_by_role("tab", name=re.compile(r"PRODUCT INFO|INFORMAÇÕES DO PRODUTO|PRODUTO", re.IGNORECASE)).first.click(force=True)
+                        except: target_f.get_by_text(re.compile(r"PRODUCT INFO|INFORMAÇÕES DO PRODUTO|PRODUTO", re.IGNORECASE)).first.click(force=True)
                         page.wait_for_timeout(1000) 
                         
                         try:
-                            olho_prod = target_f.locator('.detail-item', has_text="Goods name").locator('svg, [role="button"]').first
+                            olho_prod = target_f.locator('.detail-item', has_text=re.compile(r"Goods name|mercadoria|produto", re.IGNORECASE)).locator('svg, [role="button"]').first
                             if olho_prod.is_visible(timeout=1000):
                                 olho_prod.click(force=True)
                                 page.wait_for_timeout(1500)
                         except: pass
 
                         try:
-                            olho_val = target_f.locator('.detail-item', has_text="Declared Value (Uploaded)(BRL)").locator('svg, [role="button"]').first
+                            olho_val = target_f.locator('.detail-item', has_text=re.compile(r"Declared Value|valor", re.IGNORECASE)).locator('svg, [role="button"]').first
                             if olho_val.is_visible(timeout=1000):
                                 olho_val.click(force=True)
                                 page.wait_for_timeout(1500)
@@ -262,11 +406,15 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None):
                         
                         dados_prod = target_f.evaluate('''() => {
                             const buscar = (t) => {
+                                const termos = t.split("|").map(s => s.trim().toLowerCase());
                                 const items = Array.from(document.querySelectorAll('.detail-item'));
-                                const found = items.find(i => i.innerText.includes(t));
+                                const found = items.find(i => {
+                                    const text = i.innerText.toLowerCase();
+                                    return termos.some(termo => text.includes(termo));
+                                });
                                 return found ? found.querySelector('.value').innerText.replace("****", "").trim() : "N/A";
                             };
-                            return { produto: buscar("Goods name"), valor: buscar("Declared Value (Uploaded)(BRL)") };
+                            return { produto: buscar("Goods name|mercadoria|produto"), valor: buscar("Declared Value|valor declarado|valor") };
                         }''')
                         produto = dados_prod['produto']
                         valor = dados_prod['valor']
@@ -276,8 +424,8 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None):
 
                     prazo = prazo_da_linha if prazo_da_linha else "N/A"
                     try:
-                        try: target_f.get_by_role("tab", name="OPS INFO").first.click(force=True)
-                        except: target_f.get_by_text("OPS INFO").first.click(force=True)
+                        try: target_f.get_by_role("tab", name=re.compile(r"OPS INFO|OPERAÇÃO", re.IGNORECASE)).first.click(force=True)
+                        except: target_f.get_by_text(re.compile(r"OPS INFO|OPERAÇÃO", re.IGNORECASE)).first.click(force=True)
                         page.wait_for_timeout(1000)
                         
                         motorista = target_f.evaluate('''() => {
@@ -314,7 +462,7 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None):
                 df_final.to_excel(nome_arquivo, index=False)
                 
                 log(f"Planilha local gerada na pasta '{pasta_base}', subindo para a nuvem...")
-                enviar_para_google_sheets(df_final, sigla, bot, chat_id)
+                enviar_para_google_sheets(df_final, sigla, bot, chat_id, awbs_ativos=awbs_ativos)
                 
                 # ==========================================
                 # MENSAGEM COM O RESUMO DOS MOTORISTAS (LIMPO)
