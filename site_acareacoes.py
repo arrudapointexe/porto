@@ -112,7 +112,8 @@ def carregar_dados_base(nome_aba):
         if 'Motorista' in df.columns:
             df['Motorista'] = df['Motorista'].astype(str).str.strip()
         return df
-    except: 
+    except Exception as e: 
+        st.error(f"Erro ao acessar Google Sheets: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=120)
