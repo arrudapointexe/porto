@@ -626,12 +626,12 @@ def consolidar_calcular_e_salvar(lista_dfs, caminho_destino):
 
         print(f"SUCCESS: Planilha '{caminho_destino}' gerada com sucesso (waybill em formato texto).")
 
-        # --- Sincronização Automática ITR com Google Sheets (para o Monitor Online) ---
+        # --- Sincronização Automática com Google Sheets (para os Monitores Online) ---
         try:
-            from sincronizar_itr_sheets import sincronizar_itr_para_sheets
-            sincronizar_itr_para_sheets(df_fornecido=df_final)
+            from sincronizar_itr_sheets import sincronizar_expedicao_completa
+            sincronizar_expedicao_completa(df_fornecido=df_final)
         except Exception as e_sync:
-            print(f"WARN: Falha na sincronização ITR para Google Sheets: {e_sync}")
+            print(f"WARN: Falha na sincronização para Google Sheets: {e_sync}")
 
     except PermissionError:
         print(f"FATAL: PERMISSÃO NEGADA para escrever no arquivo '{caminho_destino}'. Certifique-se de fechar o Excel.")
