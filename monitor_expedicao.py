@@ -22,18 +22,9 @@ except ImportError:
     config = None
 
 try:
-    from scraper_contato import buscar_dados_contato_imile, garantir_playwright_browsers
+    from scraper_contato import buscar_dados_contato_imile
 except Exception:
     buscar_dados_contato_imile = None
-    garantir_playwright_browsers = None
-
-@st.cache_resource(show_spinner=False)
-def inicializar_playwright_cloud():
-    if garantir_playwright_browsers:
-        try:
-            garantir_playwright_browsers()
-        except Exception:
-            pass
 
 # ==========================================
 # CONFIGURAÇÃO DA PÁGINA STREAMLIT
@@ -1486,7 +1477,6 @@ def render_aba_busca(df_dados):
 # FUNÇÃO PRINCIPAL
 # ==========================================
 def main():
-    inicializar_playwright_cloud()
     if os.path.exists("c:/bots/logo.png"):
         st.logo("c:/bots/logo.png", size="large")
     elif os.path.exists("logo.png"):

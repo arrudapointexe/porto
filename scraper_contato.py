@@ -10,12 +10,19 @@ _PLAYWRIGHT_READY = False
 
 def garantir_playwright_browsers():
     """
-    Verifica e instala os navegadores do Playwright no ambiente Linux (Streamlit Cloud).
+    Garante que exista um navegador para o Playwright sem travar o sistema.
+    Executado sob demanda (apenas quando o usuário clica em buscar contato).
     """
     global _PLAYWRIGHT_READY
     if _PLAYWRIGHT_READY:
         return
     
+    # Se já existir Chromium do sistema (/usr/bin/chromium via packages.txt), usa direto
+    sys_chrome = shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
+    if sys_chrome:
+        _PLAYWRIGHT_READY = True
+        return
+
     if os.name != 'nt':
         cache_dir = os.path.expanduser("~/.cache/ms-playwright")
         tem_navegador = False
@@ -26,11 +33,16 @@ def garantir_playwright_browsers():
                     break
         
         if not tem_navegador:
-            print("Instalando Chromium do Playwright no ambiente Linux...")
             try:
-                subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+                subprocess.run(
+                    [sys.executable, "-m", "playwright", "install", "chromium"],
+                    timeout=45,
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
             except Exception as e:
-                print(f"Aviso ao rodar 'playwright install chromium': {e}")
+                print(f"Aviso ao instalar Chromium: {e}")
                 
     _PLAYWRIGHT_READY = True
 
@@ -38,8 +50,6 @@ def _iniciar_browser(p):
     """
     Inicia o Chromium com flags essenciais para ambientes Linux/Cloud em containers.
     """
-    garantir_playwright_browsers()
-    
     launch_args = [
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
@@ -48,21 +58,24 @@ def _iniciar_browser(p):
         "--disable-gpu",
     ]
     
-    # Tentativa 1: Iniciar normalmente pelo Playwright
+    # 1. Se existir Chromium no sistema (ex: instalado via packages.txt no Streamlit Cloud)
+    sys_chrome = shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
+    if sys_chrome:
+        try:
+            return p.chromium.launch(executable_path=sys_chrome, headless=True, args=launch_args)
+        except Exception as e_sys:
+            print(f"Falha ao iniciar Chromium do sistema ({e_sys}). Tentando Playwright...")
+
+    # 2. Tentativa padrão via binário do Playwright
     try:
         return p.chromium.launch(headless=True, args=launch_args)
     except Exception as e1:
-        print(f"Tentativa 1 com Playwright falhou ({e1}). Tentando 'playwright install chromium'...")
+        print(f"Tentativa padrão Playwright falhou ({e1}). Executando instalação sob demanda...")
+        garantir_playwright_browsers()
         try:
-            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
             return p.chromium.launch(headless=True, args=launch_args)
         except Exception as e2:
-            print(f"Tentativa 2 após install falhou ({e2}). Tentando binário do sistema...")
-            sys_chrome = shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
-            if sys_chrome:
-                print(f"Usando Chromium do sistema: {sys_chrome}")
-                return p.chromium.launch(executable_path=sys_chrome, headless=True, args=launch_args)
-            raise RuntimeError(f"Nenhum navegador Chromium pôde ser iniciado: {e1} | {e2}")
+            raise RuntimeError(f"Navegador não disponível no servidor: {e1} | {e2}")
 
 def buscar_dados_contato_imile(codigo, usuario, senha):
     dados_cli = {"nome": "N/A", "tel": "N/A"}
