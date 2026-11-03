@@ -21,9 +21,18 @@ except ImportError:
     config = None
 
 try:
-    from scraper_contato import buscar_dados_contato_imile
+    from scraper_contato import buscar_dados_contato_imile, garantir_playwright_browsers
 except Exception:
     buscar_dados_contato_imile = None
+    garantir_playwright_browsers = None
+
+@st.cache_resource(show_spinner=False)
+def inicializar_playwright_cloud():
+    if garantir_playwright_browsers:
+        try:
+            garantir_playwright_browsers()
+        except Exception:
+            pass
 
 # ==========================================
 # CONFIGURAÇÃO DA PÁGINA STREAMLIT
@@ -816,11 +825,22 @@ def render_aba_rota(df_rota):
                             u, s = obter_credenciais_itr()
                             if not u or not s:
                                 btn_ph.error("Sem credenciais ITR.")
+                            elif not buscar_dados_contato_imile:
+                                btn_ph.error("Módulo de busca de contato não disponível.")
                             else:
                                 with st.spinner("Buscando telefone..."):
-                                    res = buscar_dados_contato_imile(awb, u, s)
+                                    try:
+                                        res = buscar_dados_contato_imile(awb, u, s)
+                                    except Exception as e_err:
+                                        res = {"erro": str(e_err), "telefone": "N/A"}
+                                
                                 if not res.get('telefone') or res['telefone'] == "N/A":
-                                    btn_ph.error("Telefone não achado")
+                                    msg_err = res.get('erro', 'Telefone não achado')
+                                    btn_ph.warning(f"⚠️ {msg_err}")
+                                    btn_ph.markdown(
+                                        f'<a href="https://ds.imile.com/#/DSOperation/WaybillManagement/dsTrackQuery" target="_blank" style="color: #38bdf8; font-size: 0.8rem; text-decoration: underline;">🔗 Abrir iMile ({awb})</a>',
+                                        unsafe_allow_html=True
+                                    )
                                 else:
                                     link = gerar_link_whatsapp(
                                         res['telefone'], res.get('nome', ''),
@@ -1045,11 +1065,22 @@ def render_aba_piso(df_piso):
                             u, s = obter_credenciais_itr()
                             if not u or not s:
                                 btn_ph.error("Sem credenciais")
+                            elif not buscar_dados_contato_imile:
+                                btn_ph.error("Módulo de busca de contato não disponível.")
                             else:
-                                with st.spinner("Buscando..."):
-                                    res = buscar_dados_contato_imile(awb, u, s)
+                                with st.spinner("Buscando dados de contato na iMile..."):
+                                    try:
+                                        res = buscar_dados_contato_imile(awb, u, s)
+                                    except Exception as e_err:
+                                        res = {"erro": str(e_err), "telefone": "N/A"}
+                                
                                 if not res.get('telefone') or res['telefone'] == "N/A":
-                                    btn_ph.error("Telefone não achado")
+                                    msg_err = res.get('erro', 'Telefone não achado')
+                                    btn_ph.warning(f"⚠️ {msg_err}")
+                                    btn_ph.markdown(
+                                        f'<a href="https://ds.imile.com/#/DSOperation/WaybillManagement/dsTrackQuery" target="_blank" style="color: #38bdf8; font-size: 0.8rem; text-decoration: underline;">🔗 Abrir iMile ({awb})</a>',
+                                        unsafe_allow_html=True
+                                    )
                                 else:
                                     link = gerar_link_whatsapp(
                                         res['telefone'], res.get('nome', ''),
@@ -1107,11 +1138,22 @@ def render_aba_busca(df_itr):
                             u, s = obter_credenciais_itr()
                             if not u or not s:
                                 st.error("Sem credenciais ITR.")
+                            elif not buscar_dados_contato_imile:
+                                st.error("Módulo de busca de contato não disponível.")
                             else:
                                 with st.spinner("Buscando dados de contato na iMile..."):
-                                    res = buscar_dados_contato_imile(awb, u, s)
+                                    try:
+                                        res = buscar_dados_contato_imile(awb, u, s)
+                                    except Exception as e_err:
+                                        res = {"erro": str(e_err), "telefone": "N/A"}
+                                
                                 if not res.get('telefone') or res['telefone'] == "N/A":
-                                    st.error("Telefone não achado no sistema.")
+                                    msg_err = res.get('erro', 'Telefone não achado no sistema.')
+                                    st.warning(f"⚠️ {msg_err}")
+                                    st.markdown(
+                                        f'<a href="https://ds.imile.com/#/DSOperation/WaybillManagement/dsTrackQuery" target="_blank" style="color: #38bdf8; font-size: 0.85rem; text-decoration: underline;">🔗 Abrir consulta direta no portal iMile ({awb})</a>',
+                                        unsafe_allow_html=True
+                                    )
                                 else:
                                     link = gerar_link_whatsapp(
                                         res['telefone'], res.get('nome', ''),
@@ -1124,6 +1166,7 @@ def render_aba_busca(df_itr):
 # FUNÇÃO PRINCIPAL
 # ==========================================
 def main():
+    inicializar_playwright_cloud()
     if os.path.exists("c:/bots/logo.png"):
         st.logo("c:/bots/logo.png", size="large")
         
