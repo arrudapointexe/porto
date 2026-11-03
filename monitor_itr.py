@@ -906,7 +906,8 @@ def render_aba_piso(df_piso):
         filtro_status_piso = st.selectbox("Status Scan:", status_list, key="f_status_piso_itr")
         
     with pf3:
-        ordem = st.selectbox("Ordenar Bairros:", ["Maior Volume Primeiro", "Alfabética"], key="f_ordem_piso_itr")
+        opcoes_ordem_piso = ["🔥 Mais Antigo Primeiro (Maior Aging)", "Maior Volume Primeiro", "Alfabética"]
+        ordem = st.selectbox("Ordenar Bairros:", opcoes_ordem_piso, index=0, key="f_ordem_piso_itr")
         
     with pf4:
         busca_piso = st.text_input("Buscar Bairro, Cidade ou Waybill:", key="f_busca_piso_itr", placeholder="Ex: Centro, Pará, 610...")
@@ -925,10 +926,14 @@ def render_aba_piso(df_piso):
         c_cid = df_piso_view['Destination City'].astype(str).str.lower().str.contains(t, na=False)
         df_piso_view = df_piso_view[c_awb | c_bai | c_cid]
 
-    st.markdown(f"<div style='margin-top: 15px;'><b>Exibindo {len(df_piso_view)} pacotes no piso</b></div>", unsafe_allow_html=True)
+    # Ordena a visão do piso pelo aging (do mais antigo para o mais novo)
+    if 'aging' in df_piso_view.columns:
+        df_piso_view = df_piso_view.sort_values(by=['aging', 'Bairro_Display'], ascending=[False, True])
+
+    st.markdown(f"<div style='margin-top: 15px;'><b>Exibindo {len(df_piso_view)} pacotes no piso (ordenados do mais antigo para o mais novo)</b></div>", unsafe_allow_html=True)
 
     if not df_piso_view.empty:
-        cols_piso_exp = ['Waybill No', 'Last scan type', 'Destination City', 'Bairro_Display', 'Endereco_Display', 'Tipo_Localidade', 'Receive Date']
+        cols_piso_exp = ['Waybill No', 'aging', 'Last scan type', 'Destination City', 'Bairro_Display', 'Endereco_Display', 'Tipo_Localidade', 'Receive Date']
         cols_piso_exp_existentes = [c for c in cols_piso_exp if c in df_piso_view.columns]
         excel_piso_bytes = exportar_para_excel(df_piso_view[cols_piso_exp_existentes], "inventario_piso_itr.xlsx")
         st.download_button(
@@ -939,41 +944,77 @@ def render_aba_piso(df_piso):
             key="dl_piso_itr"
         )
 
-    if ordem == "Maior Volume Primeiro":
-        bairros_series = df_piso_view['Bairro_Display'].value_counts()
+    if "Aging" in ordem:
+        # Bairros com pacotes mais antigos no topo
+        resumo_bairros = df_piso_view.groupby('Bairro_Display').agg(
+            max_aging=('aging', 'max'),
+            qtd=('Waybill No', 'count')
+        ).sort_values(by=['max_aging', 'qtd'], ascending=[False, False])
+        bairros_lista = resumo_bairros.index.tolist()
+    elif ordem == "Maior Volume Primeiro":
+        bairros_lista = df_piso_view['Bairro_Display'].value_counts().index.tolist()
     else:
-        bairros_series = df_piso_view['Bairro_Display'].value_counts().sort_index()
+        bairros_lista = sorted(df_piso_view['Bairro_Display'].unique().tolist())
 
-    for bairro_nome, qtd_bairro in bairros_series.items():
-        df_b = df_piso_view[df_piso_view['Bairro_Display'] == bairro_nome]
+    for bairro_nome in bairros_lista:
+        df_b = df_piso_view[df_piso_view['Bairro_Display'] == bairro_nome].copy()
+        qtd_bairro = len(df_b)
+        
+        # Ordenação rigorosa dos pacotes: MAIS ANTIGO PRIMEIRO (maior aging -> menor aging)
+        if 'aging' in df_b.columns:
+            df_b = df_b.sort_values(by=['aging', 'Waybill No'], ascending=[False, True])
+
         cidade_b = df_b['Destination City'].iloc[0] if not df_b.empty else ""
         tipo_loc_b = df_b['Tipo_Localidade'].iloc[0] if not df_b.empty else ""
+        max_ag = int(df_b['aging'].max()) if 'aging' in df_b.columns and not df_b.empty else 0
         
+        if max_ag == 0:
+            badge_ag_txt = "🟢 D0 (Hoje)"
+        elif max_ag == 1:
+            badge_ag_txt = "⚠️ D1 (1 dia)"
+        elif max_ag == 2:
+            badge_ag_txt = "🔥 D2 (2 dias)"
+        else:
+            badge_ag_txt = f"🚨 D{max_ag} ({max_ag} dias)"
+            
         icone = "⚠️" if "Fora de Rota" in tipo_loc_b else "📍"
-        titulo_expander = f"{icone} {bairro_nome} ({cidade_b}) — {qtd_bairro} pacotes no piso"
+        titulo_expander = f"{icone} {bairro_nome} ({cidade_b}) — {qtd_bairro} pacotes | Mais antigo: {badge_ag_txt}"
         
-        with st.expander(titulo_expander, expanded=(qtd_bairro >= 5)):
+        with st.expander(titulo_expander, expanded=(qtd_bairro >= 5 or max_ag >= 2)):
             if qtd_bairro > 80:
-                st.warning("Volume alto neste bairro. Exibindo em tabela direta:")
-                st.dataframe(df_b[['Waybill No', 'Last scan type', 'Endereco_Display', 'Receive Date']], width="stretch", hide_index=True)
+                st.warning("Volume alto neste bairro. Exibindo em tabela direta (ordenada do mais antigo para o mais novo):")
+                cols_grid = [c for c in ['Waybill No', 'aging', 'Last scan type', 'Endereco_Display', 'Receive Date'] if c in df_b.columns]
+                st.dataframe(df_b[cols_grid], width="stretch", hide_index=True)
             else:
-                p_cols_h = st.columns([2, 2, 4, 2])
+                p_cols_h = st.columns([2, 1, 2, 3, 2])
                 p_cols_h[0].markdown("**Waybill (Rastreio)**")
-                p_cols_h[1].markdown("**Status no Piso**")
-                p_cols_h[2].markdown("**Endereço de Entrega**")
-                p_cols_h[3].markdown("**Ação / WhatsApp**")
+                p_cols_h[1].markdown("**Aging**")
+                p_cols_h[2].markdown("**Status no Piso**")
+                p_cols_h[3].markdown("**Endereço de Entrega**")
+                p_cols_h[4].markdown("**Ação / WhatsApp**")
                 
                 for _, row in df_b.iterrows():
                     awb = str(row['Waybill No'])
                     scan = row['Last scan type']
                     end = row['Endereco_Display']
+                    ag = int(row.get('aging', 0))
                     
-                    pr1, pr2, pr3, pr4 = st.columns([2, 2, 4, 2])
+                    if ag == 0:
+                        badge_html = "<span class='badge badge-d0'>D0</span>"
+                    elif ag == 1:
+                        badge_html = "<span class='badge badge-d1'>D1</span>"
+                    elif ag == 2:
+                        badge_html = "<span class='badge badge-d2'>D2</span>"
+                    else:
+                        badge_html = f"<span class='badge badge-d3'>D{ag}</span>"
+                        
+                    pr1, pr2, pr3, pr4, pr5 = st.columns([2, 1, 2, 3, 2])
                     pr1.write(f"`{awb}`")
-                    pr2.markdown(f"<span class='badge badge-piso'>{scan}</span>", unsafe_allow_html=True)
-                    pr3.write(end)
+                    pr2.markdown(badge_html, unsafe_allow_html=True)
+                    pr3.markdown(f"<span class='badge badge-piso'>{scan}</span>", unsafe_allow_html=True)
+                    pr4.write(end)
                     
-                    btn_ph = pr4.empty()
+                    btn_ph = pr5.empty()
                     k_link = f"wpp_piso_itr_{awb}"
                     if k_link in st.session_state:
                         btn_ph.markdown(st.session_state[k_link], unsafe_allow_html=True)
