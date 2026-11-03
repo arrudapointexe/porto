@@ -1219,8 +1219,13 @@ def render_aba_piso(df_piso, base_contexto):
         filtro_status_piso = st.selectbox("Status Scan:", status_list, key="f_status_piso_gen")
         
     with pf3:
-        opcoes_ordem_piso = ["🔥 Mais Antigo Primeiro (Maior Aging)", "Maior Volume Primeiro", "Alfabética"]
-        ordem = st.selectbox("Ordenar Bairros:", opcoes_ordem_piso, index=0, key="f_ordem_piso_gen")
+        opcoes_ordem_piso = [
+            "🔥 Mais Antigo Primeiro (Maior Aging)",
+            "🌱 Mais Novo Primeiro (Menor Aging)",
+            "📊 Maior Volume Primeiro",
+            "🔤 Alfabética"
+        ]
+        ordem = st.selectbox("Ordenar Bairros e Pacotes:", opcoes_ordem_piso, index=0, key="f_ordem_piso_gen")
         
     with pf4:
         busca_piso = st.text_input("Buscar Bairro, Cidade ou Waybill:", key="f_busca_piso_gen", placeholder="Ex: Centro, 610...")
@@ -1239,11 +1244,15 @@ def render_aba_piso(df_piso, base_contexto):
         c_cid = df_piso_view['Destination City'].astype(str).str.lower().str.contains(t, na=False)
         df_piso_view = df_piso_view[c_awb | c_bai | c_cid]
 
-    # Ordena a visão do piso pelo aging (do mais antigo para o mais novo)
-    if 'aging' in df_piso_view.columns:
-        df_piso_view = df_piso_view.sort_values(by=['aging', 'Base', 'Bairro_Display'], ascending=[False, True, True])
+    # Determina a direção de ordenação do Aging (True = Menor pro Maior, False = Maior pro Menor)
+    aging_asc = True if "Menor Aging" in ordem or "Mais Novo" in ordem else False
 
-    st.markdown(f"<div style='margin-top: 15px;'><b>Exibindo {len(df_piso_view)} pacotes no piso (ordenados do mais antigo para o mais novo)</b></div>", unsafe_allow_html=True)
+    # Ordena a visão do piso pelo aging conforme escolha
+    if 'aging' in df_piso_view.columns:
+        df_piso_view = df_piso_view.sort_values(by=['aging', 'Base', 'Bairro_Display'], ascending=[aging_asc, True, True])
+
+    rotulo_ordem = "do menor para o maior aging (mais novos primeiro)" if aging_asc else "do maior para o menor aging (mais antigos primeiro)"
+    st.markdown(f"<div style='margin-top: 15px;'><b>Exibindo {len(df_piso_view)} pacotes no piso (ordenados {rotulo_ordem})</b></div>", unsafe_allow_html=True)
 
     if not df_piso_view.empty:
         cols_piso_exp = ['Base', 'Waybill No', 'aging', 'Data_Display', 'Last scan type', 'Destination City', 'Bairro_Display', 'Endereco_Display', 'Tipo_Localidade', 'Receive Date']
@@ -1257,14 +1266,21 @@ def render_aba_piso(df_piso, base_contexto):
             key="dl_piso_gen"
         )
 
-    if "Aging" in ordem:
+    if "Maior Aging" in ordem or "Mais Antigo" in ordem:
         # Bairros com pacotes mais antigos no topo
         resumo_bairros = df_piso_view.groupby('Bairro_Display').agg(
-            max_aging=('aging', 'max'),
+            ag_metric=('aging', 'max'),
             qtd=('Waybill No', 'count')
-        ).sort_values(by=['max_aging', 'qtd'], ascending=[False, False])
+        ).sort_values(by=['ag_metric', 'qtd'], ascending=[False, False])
         bairros_lista = resumo_bairros.index.tolist()
-    elif ordem == "Maior Volume Primeiro":
+    elif "Menor Aging" in ordem or "Mais Novo" in ordem:
+        # Bairros com pacotes mais novos no topo
+        resumo_bairros = df_piso_view.groupby('Bairro_Display').agg(
+            ag_metric=('aging', 'min'),
+            qtd=('Waybill No', 'count')
+        ).sort_values(by=['ag_metric', 'qtd'], ascending=[True, False])
+        bairros_lista = resumo_bairros.index.tolist()
+    elif "Volume" in ordem:
         bairros_lista = df_piso_view['Bairro_Display'].value_counts().index.tolist()
     else:
         bairros_lista = sorted(df_piso_view['Bairro_Display'].unique().tolist())
@@ -1273,30 +1289,36 @@ def render_aba_piso(df_piso, base_contexto):
         df_b = df_piso_view[df_piso_view['Bairro_Display'] == bairro_nome].copy()
         qtd_bairro = len(df_b)
         
-        # Ordenação rigorosa dos pacotes: MAIS ANTIGO PRIMEIRO (maior aging -> menor aging)
+        # Ordenação rigorosa dos pacotes no bairro
         if 'aging' in df_b.columns:
-            df_b = df_b.sort_values(by=['aging', 'Waybill No'], ascending=[False, True])
+            df_b = df_b.sort_values(by=['aging', 'Waybill No'], ascending=[aging_asc, True])
 
         cidade_b = df_b['Destination City'].iloc[0] if not df_b.empty else ""
         base_b = df_b['Base'].iloc[0] if not df_b.empty else ""
         tipo_loc_b = df_b['Tipo_Localidade'].iloc[0] if not df_b.empty else ""
-        max_ag = int(df_b['aging'].max()) if 'aging' in df_b.columns and not df_b.empty else 0
         
-        if max_ag == 0:
+        if aging_asc:
+            ref_ag = int(df_b['aging'].min()) if 'aging' in df_b.columns and not df_b.empty else 0
+            tag_ref = "Mais novo"
+        else:
+            ref_ag = int(df_b['aging'].max()) if 'aging' in df_b.columns and not df_b.empty else 0
+            tag_ref = "Mais antigo"
+
+        if ref_ag == 0:
             badge_ag_txt = "🟢 D0 (Hoje)"
-        elif max_ag == 1:
+        elif ref_ag == 1:
             badge_ag_txt = "⚠️ D1 (1 dia)"
-        elif max_ag == 2:
+        elif ref_ag == 2:
             badge_ag_txt = "🔥 D2 (2 dias)"
         else:
-            badge_ag_txt = f"🚨 D{max_ag} ({max_ag} dias)"
+            badge_ag_txt = f"🚨 D{ref_ag} ({ref_ag} dias)"
             
         icone = "⚠️" if "Fora de Rota" in tipo_loc_b else "📍"
-        titulo_expander = f"{icone} [{base_b}] {bairro_nome} ({cidade_b}) — {qtd_bairro} pacotes | Mais antigo: {badge_ag_txt}"
+        titulo_expander = f"{icone} [{base_b}] {bairro_nome} ({cidade_b}) — {qtd_bairro} pacotes | {tag_ref}: {badge_ag_txt}"
         
-        with st.expander(titulo_expander, expanded=(qtd_bairro >= 5 or max_ag >= 2)):
+        with st.expander(titulo_expander, expanded=(qtd_bairro >= 5 or (not aging_asc and ref_ag >= 2))):
             if qtd_bairro > 80:
-                st.warning("Volume alto neste bairro. Exibindo em tabela direta (ordenada do mais antigo para o mais novo):")
+                st.warning(f"Volume alto neste bairro. Exibindo em tabela direta ({rotulo_ordem}):")
                 cols_grid = [c for c in ['Base', 'Waybill No', 'aging', 'Data_Display', 'Last scan type', 'Endereco_Display', 'Receive Date'] if c in df_b.columns]
                 st.dataframe(df_b[cols_grid], width="stretch", hide_index=True)
             else:
