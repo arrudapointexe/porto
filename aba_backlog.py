@@ -196,7 +196,14 @@ def preparar_backlog(df_in):
     d["Equipe"] = d.apply(_equipe, axis=1)
 
     if "Motorista_Limpo" not in d.columns:
-        d["Motorista_Limpo"] = "Não Atribuído"
+        if "Driver Name" in d.columns:
+            d["Motorista_Limpo"] = d["Driver Name"].apply(
+                lambda v: re.sub(r"^\([A-Za-z0-9_]+\s+(LOC|INT)\)\s*", "", _txt(v)).strip() or "Não Atribuído"
+            )
+        else:
+            d["Motorista_Limpo"] = "Não Atribuído"
+    else:
+        d["Motorista_Limpo"] = d["Motorista_Limpo"].apply(lambda v: _txt(v) or "Não Atribuído")
     if "Destination City" not in d.columns:
         d["Destination City"] = ""
     if "Bairro_Display" not in d.columns:
@@ -242,6 +249,164 @@ def _excel_bytes(df):
     with pd.ExcelWriter(out, engine="openpyxl") as w:
         df.to_excel(w, index=False, sheet_name="Backlog")
     return out.getvalue()
+
+
+# ==========================================
+# RELAÇÃO DE MOTORISTAS POR BACKLOG
+# ==========================================
+def construir_relacao_motoristas_backlog(df_in, incluir_nao_atribuido=False):
+    """Constrói tabela consolidada de motoristas distribuída por faixas de backlog."""
+    if df_in is None or df_in.empty:
+        return pd.DataFrame()
+
+    df_m = df_in if incluir_nao_atribuido else df_in[df_in["Motorista_Limpo"] != "Não Atribuído"]
+    if df_m.empty:
+        return pd.DataFrame()
+
+    col_crit = f"Críticos (≥{LIMIAR_CRITICO}d)"
+    linhas = []
+    for mot, grp in df_m.groupby("Motorista_Limpo"):
+        total_m = len(grp)
+        base_m = _txt(grp["Base"].iloc[0]) if "Base" in grp.columns else ""
+        eq_m = _txt(grp["Equipe"].iloc[0]) if "Equipe" in grp.columns else "—"
+        vc_fx = grp["Faixa_Backlog"].value_counts()
+
+        f_0_1 = int(vc_fx.get("🟢 0–1 dia", 0))
+        f_2 = int(vc_fx.get("🟡 2 dias", 0))
+        f_3 = int(vc_fx.get("🟠 3 dias", 0))
+        f_4_5 = int(vc_fx.get("🔴 4–5 dias", 0))
+        f_6_10 = int(vc_fx.get("🟣 6–10 dias", 0))
+        f_10p = int(vc_fx.get("⚫ +10 dias", 0))
+
+        crit_m = int((grp["Backlog_Dias"] >= LIMIAR_CRITICO).sum())
+        pct_crit = round((crit_m / total_m * 100), 1) if total_m > 0 else 0.0
+        medio_m = round(float(grp["Backlog_Dias"].mean()), 1) if total_m > 0 else 0.0
+        max_m = int(grp["Backlog_Dias"].max()) if total_m > 0 else 0
+        oc_m = int(grp["Tem_Ocorrencia"].sum())
+        reinc_m = int((grp["Tentativas"] >= 2).sum())
+        val_m = round(float(grp["Valor_Declarado"].sum()), 2)
+
+        if crit_m > 0:
+            sit = f"🔴 {crit_m} crítico(s) (máx {max_m}d)"
+        elif max_m >= 2:
+            sit = f"🟡 Atenção (máx {max_m}d)"
+        else:
+            sit = "🟢 Regular (0–1d)"
+
+        linhas.append({
+            "Base": base_m,
+            "Equipe": eq_m,
+            "Motorista": mot,
+            "Total": total_m,
+            "🟢 0–1d": f_0_1,
+            "🟡 2d": f_2,
+            "🟠 3d": f_3,
+            "🔴 4–5d": f_4_5,
+            "🟣 6–10d": f_6_10,
+            "⚫ +10d": f_10p,
+            col_crit: crit_m,
+            "% Crítico": pct_crit,
+            "Médio (d)": medio_m,
+            "Máx (d)": max_m,
+            "Ocorrências": oc_m,
+            "Reincidentes": reinc_m,
+            "Valor (R$)": val_m,
+            "Situação": sit,
+        })
+
+    return pd.DataFrame(linhas)
+
+
+def gerar_texto_motoristas_backlog_wpp(df_rel, contexto="", divisao="TODOS", modo="completo"):
+    """Gera mensagem formatada com a relação de motoristas por backlog para WhatsApp."""
+    agora = datetime.now().strftime("%d/%m/%Y às %H:%M")
+    col_crit = f"Críticos (≥{LIMIAR_CRITICO}d)"
+    titulo_base = contexto if contexto else "Todas as Bases"
+
+    if df_rel is None or df_rel.empty:
+        return f"📊 *RELAÇÃO DE MOTORISTAS POR BACKLOG — {titulo_base.upper()}*\n_Nenhum motorista encontrado no filtro atual._"
+
+    df_w = df_rel.copy()
+    if modo == "criticos":
+        df_w = df_w[df_w[col_crit] > 0]
+
+    if divisao == "LOC":
+        df_w = df_w[df_w["Equipe"] == "LOC"]
+        sufixo = " — LOC (LOCAL)"
+    elif divisao == "INT":
+        df_w = df_w[df_w["Equipe"] == "INT"]
+        sufixo = " — INT (INTERIOR)"
+    else:
+        sufixo = ""
+
+    if df_w.empty:
+        return f"📊 *RELAÇÃO DE MOTORISTAS POR BACKLOG — {titulo_base.upper()}{sufixo}*\n_Nenhum motorista para os critérios selecionados._"
+
+    total_mots = len(df_w)
+    total_pcts = int(df_w["Total"].sum())
+    total_crit = int(df_w[col_crit].sum())
+    multi_b = df_w["Base"].nunique() > 1
+
+    def _formatar_bloco(df_bloco):
+        itens = []
+        for _, r in df_bloco.iterrows():
+            ic = "🔴" if r[col_crit] > 0 else ("🟡" if r["Máx (d)"] >= 2 else "🟢")
+            tag_b = f"[{r['Base']}] " if multi_b and r["Base"] else ""
+            if modo == "simplificado":
+                crit_s = f" | 🔴 {int(r[col_crit])} crít." if r[col_crit] > 0 else ""
+                itens.append(f"{ic} {tag_b}*{r['Motorista']}* — *{int(r['Total'])} pct*{crit_s} (máx {int(r['Máx (d)'])}d)")
+            else:
+                partes_fx = []
+                for col_fx, emoji_fx in [
+                    ("🟢 0–1d", "🟢0-1d:"),
+                    ("🟡 2d", "🟡2d:"),
+                    ("🟠 3d", "🟠3d:"),
+                    ("🔴 4–5d", "🔴4-5d:"),
+                    ("🟣 6–10d", "🟣6-10d:"),
+                    ("⚫ +10d", "⚫+10d:"),
+                ]:
+                    val_fx = int(r.get(col_fx, 0))
+                    if val_fx > 0:
+                        partes_fx.append(f"{emoji_fx}{val_fx}")
+                fx_str = f" ({' | '.join(partes_fx)})" if partes_fx else ""
+                itens.append(
+                    f"{ic} {tag_b}*{r['Motorista']}* — *{int(r['Total'])} pct*{fx_str} | médio {r['Médio (d)']:.1f}d | máx {int(r['Máx (d)'])}d"
+                )
+        return "\n".join(itens)
+
+    linhas = [
+        f"👨‍✈️ *RELAÇÃO DE MOTORISTAS POR BACKLOG — {titulo_base.upper()}{sufixo}*",
+        f"🗓️ _Atualizado em {agora}_",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"👨‍✈️ *Motoristas:* {total_mots} | 📦 *Pacotes:* {total_pcts} | 🔴 *Críticos (≥{LIMIAR_CRITICO}d):* {total_crit}",
+        "",
+    ]
+
+    if divisao == "SEPARADO":
+        df_loc = df_w[df_w["Equipe"] == "LOC"]
+        df_int = df_w[df_w["Equipe"] == "INT"]
+        df_out = df_w[~df_w["Equipe"].isin(["LOC", "INT"])]
+        if not df_loc.empty:
+            linhas.append(f"🏙️ *EQUIPE LOC (LOCAL) — {len(df_loc)} mot. / {int(df_loc['Total'].sum())} pct:*")
+            linhas.append(_formatar_bloco(df_loc))
+            linhas.append("")
+        if not df_int.empty:
+            linhas.append(f"🏞️ *EQUIPE INT (INTERIOR) — {len(df_int)} mot. / {int(df_int['Total'].sum())} pct:*")
+            linhas.append(_formatar_bloco(df_int))
+            linhas.append("")
+        if not df_out.empty:
+            linhas.append(f"📦 *OUTROS / PISO — {int(df_out['Total'].sum())} pct:*")
+            linhas.append(_formatar_bloco(df_out))
+            linhas.append("")
+    else:
+        linhas.append(_formatar_bloco(df_w))
+        linhas.append("")
+
+    linhas += [
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "⚠️ *Favor priorizar a baixa dos pacotes com maior backlog!*",
+    ]
+    return "\n".join(linhas)
 
 
 # ==========================================
@@ -566,6 +731,254 @@ def render_aba_backlog(df_base, contexto="", key_prefix="bk"):
                 color_discrete_map=CORES_FAIXA, labels={"Destination City": "", "Qtd": "Pacotes", "Faixa_Backlog": "Faixa"},
             )
             st.plotly_chart(_layout(fig_c, max(280, 30 * len(top_c) + 90)), use_container_width=True, key=k("g_cid"))
+
+    # ---------------- RELAÇÃO DE MOTORISTAS POR BACKLOG ----------------
+    st.markdown("<hr style='border-color: #1e293b; margin: 22px 0 16px 0;'>", unsafe_allow_html=True)
+    st.markdown("#### 👨‍✈️ Relação de Motoristas por Backlog")
+    st.caption(
+        "Visão consolidada de quantos pacotes cada motorista possui em cada faixa de backlog, "
+        "com gráfico pronto para o grupo, planilha Excel, gerador de texto para WhatsApp e detalhamento por entregador."
+    )
+
+    col_crit_nome = f"Críticos (≥{LIMIAR_CRITICO}d)"
+    cm1, cm2, cm3, cm4 = st.columns([3, 2, 3, 2])
+    with cm1:
+        escopo_mot = st.selectbox(
+            "👤 Escopo:",
+            ["👨‍✈️ Apenas Motoristas Atribuídos", "📦 Incluir Não Atribuído (Piso)"],
+            key=k("mot_escopo"),
+        )
+    with cm2:
+        eq_mot = st.selectbox(
+            "👥 Equipe:",
+            ["Todas", "🏙️ LOC (Local)", "🏞️ INT (Interior)"],
+            key=k("mot_eq"),
+        )
+    with cm3:
+        ordem_mot = st.selectbox(
+            "📊 Ordenar motoristas por:",
+            [
+                f"🔴 Mais Críticos (≥ {LIMIAR_CRITICO}d)",
+                "📦 Maior Volume Total",
+                "🔥 Maior Backlog Máximo (dias)",
+                "⏱️ Maior Backlog Médio (dias)",
+                "⚠️ Mais Ocorrências",
+                "🔤 Ordem Alfabética",
+            ],
+            key=k("mot_ordem"),
+        )
+    with cm4:
+        qtd_graf_mot = st.selectbox(
+            "📈 Exibir no gráfico:",
+            ["Top 15", "Top 25", "Top 40", "Todos"],
+            index=1,
+            key=k("mot_qtd_graf"),
+        )
+
+    incluir_na = "Incluir Não Atribuído" in escopo_mot
+    df_rel_mot = construir_relacao_motoristas_backlog(dfv, incluir_nao_atribuido=incluir_na)
+
+    if not df_rel_mot.empty and eq_mot != "Todas":
+        alvo_eq = "LOC" if "LOC" in eq_mot else "INT"
+        df_rel_mot = df_rel_mot[df_rel_mot["Equipe"] == alvo_eq].copy()
+
+    if df_rel_mot.empty:
+        st.info("Nenhum motorista atribuído encontrado para os filtros atuais. Altere o escopo para 'Incluir Não Atribuído (Piso)' se desejar ver os pacotes sem motorista.")
+    else:
+        if ordem_mot.startswith("🔴"):
+            df_rel_mot = df_rel_mot.sort_values([col_crit_nome, "Máx (d)", "Total"], ascending=[False, False, False])
+        elif ordem_mot.startswith("📦"):
+            df_rel_mot = df_rel_mot.sort_values(["Total", col_crit_nome, "Máx (d)"], ascending=[False, False, False])
+        elif ordem_mot.startswith("🔥"):
+            df_rel_mot = df_rel_mot.sort_values(["Máx (d)", col_crit_nome, "Total"], ascending=[False, False, False])
+        elif ordem_mot.startswith("⏱️"):
+            df_rel_mot = df_rel_mot.sort_values(["Médio (d)", "Máx (d)", "Total"], ascending=[False, False, False])
+        elif ordem_mot.startswith("⚠️"):
+            df_rel_mot = df_rel_mot.sort_values(["Ocorrências", col_crit_nome, "Total"], ascending=[False, False, False])
+        else:
+            df_rel_mot = df_rel_mot.sort_values("Motorista", ascending=True)
+
+        df_rel_mot = df_rel_mot.reset_index(drop=True)
+
+        # Gráfico Horizontal Empilhado de Motoristas por Faixa de Backlog
+        df_graf_m = df_rel_mot.copy()
+        if qtd_graf_mot == "Top 15":
+            df_graf_m = df_graf_m.head(15)
+        elif qtd_graf_mot == "Top 25":
+            df_graf_m = df_graf_m.head(25)
+        elif qtd_graf_mot == "Top 40":
+            df_graf_m = df_graf_m.head(40)
+        df_graf_m = df_graf_m.iloc[::-1]
+
+        altura_m = max(300, min(1500, len(df_graf_m) * 28 + 80))
+        fig_m = go.Figure()
+        mapa_cols_faixa = [
+            ("🟢 0–1d", "🟢 0–1 dia", "#22c55e"),
+            ("🟡 2d", "🟡 2 dias", "#eab308"),
+            ("🟠 3d", "🟠 3 dias", "#f97316"),
+            ("🔴 4–5d", "🔴 4–5 dias", "#ef4444"),
+            ("🟣 6–10d", "🟣 6–10 dias", "#a855f7"),
+            ("⚫ +10d", "⚫ +10 dias", "#64748b"),
+        ]
+        for col_curta, nome_legenda, cor_barra in mapa_cols_faixa:
+            if col_curta in df_graf_m.columns and df_graf_m[col_curta].sum() > 0:
+                fig_m.add_trace(go.Bar(
+                    y=df_graf_m["Motorista"],
+                    x=df_graf_m[col_curta],
+                    name=nome_legenda,
+                    orientation="h",
+                    marker_color=cor_barra,
+                    text=df_graf_m[col_curta].apply(lambda v: str(int(v)) if v > 0 else ""),
+                    textposition="inside",
+                    insidetextanchor="middle",
+                ))
+        fig_m.update_layout(barmode="stack")
+        st.plotly_chart(
+            _layout(fig_m, altura_m),
+            use_container_width=True,
+            key=k("g_mot_backlog"),
+            config={
+                "toImageButtonOptions": {
+                    "format": "png",
+                    "filename": f"motoristas_backlog_{(contexto or 'geral').replace(' ', '_')}",
+                    "height": altura_m,
+                    "width": 950,
+                    "scale": 2,
+                }
+            },
+        )
+        st.caption("📸 **Dica:** Passe o mouse sobre o gráfico e clique no ícone da câmera 📷 no canto superior direito para baixar a imagem em alta resolução para o grupo.")
+
+        # Tabela Consolidada da Relação de Motoristas por Backlog
+        cols_mot_exibir = [
+            c for c in [
+                "Base", "Equipe", "Motorista", "Total",
+                "🟢 0–1d", "🟡 2d", "🟠 3d", "🔴 4–5d", "🟣 6–10d", "⚫ +10d",
+                col_crit_nome, "% Crítico", "Médio (d)", "Máx (d)",
+                "Ocorrências", "Reincidentes", "Valor (R$)", "Situação"
+            ]
+            if c in df_rel_mot.columns and (c != "Base" or multi_base)
+        ]
+        df_rel_view = df_rel_mot[cols_mot_exibir]
+
+        st.dataframe(
+            df_rel_view,
+            hide_index=True,
+            use_container_width=True,
+            height=min(560, 42 + 35 * len(df_rel_view)),
+            column_config={
+                "% Crítico": st.column_config.ProgressColumn("% Crítico", min_value=0, max_value=100, format="%.0f%%"),
+                "Médio (d)": st.column_config.NumberColumn("Médio (d)", format="%.1f"),
+                "Máx (d)": st.column_config.NumberColumn("Máx (d)", format="%d d"),
+                "Valor (R$)": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f"),
+            },
+        )
+
+        cb_dl1, cb_dl2 = st.columns([4, 6])
+        with cb_dl1:
+            st.download_button(
+                label="📥 Baixar Relação de Motoristas (Excel)",
+                data=_excel_bytes(df_rel_view),
+                file_name=f"relacao_motoristas_backlog_{(contexto or 'geral').replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=k("dl_rel_mot"),
+            )
+        with cb_dl2:
+            st.markdown(
+                f"<div style='padding-top: 8px; color: #94a3b8; font-size: 0.9rem;'>"
+                f"👨‍✈️ <b>{len(df_rel_view)}</b> motoristas listados | "
+                f"📦 <b>{int(df_rel_view['Total'].sum())}</b> pacotes | "
+                f"🔴 <b>{int(df_rel_view[col_crit_nome].sum())}</b> críticos (≥{LIMIAR_CRITICO}d)"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        # Gerador de WhatsApp específico para a Relação de Motoristas por Backlog
+        with st.expander("📢 Copiar Relação de Motoristas por Backlog para o WhatsApp", expanded=False):
+            wm1, wm2 = st.columns(2)
+            with wm1:
+                div_wpp_m = st.radio(
+                    "Divisão de Equipe:",
+                    [
+                        "🏢 Todos os Motoristas",
+                        "🏙️ Apenas LOC (Local)",
+                        "🏞️ Apenas INT (Interior)",
+                        "📑 Separar em Blocos (LOC + INT)",
+                    ],
+                    horizontal=True,
+                    key=k("wpp_mot_div"),
+                )
+            with wm2:
+                modo_wpp_m = st.radio(
+                    "Formato da Linha:",
+                    [
+                        "Completo (Total + Faixas + Máx)",
+                        "Simplificado (Nome + Total + Críticos)",
+                        f"🔴 Apenas com Críticos (≥ {LIMIAR_CRITICO}d)",
+                    ],
+                    horizontal=True,
+                    key=k("wpp_mot_modo"),
+                )
+
+            cod_div = "TODOS"
+            if "Apenas LOC" in div_wpp_m:
+                cod_div = "LOC"
+            elif "Apenas INT" in div_wpp_m:
+                cod_div = "INT"
+            elif "Separar em Blocos" in div_wpp_m:
+                cod_div = "SEPARADO"
+
+            cod_modo = "completo"
+            if "Simplificado" in modo_wpp_m:
+                cod_modo = "simplificado"
+            elif "Apenas com Críticos" in modo_wpp_m:
+                cod_modo = "criticos"
+
+            txt_mot_wpp = gerar_texto_motoristas_backlog_wpp(
+                df_rel_mot, contexto=contexto or "Todas as Bases", divisao=cod_div, modo=cod_modo
+            )
+            st.code(txt_mot_wpp, language="text")
+            bm1, bm2 = st.columns([3, 7])
+            with bm1:
+                st.link_button(
+                    "📲 Enviar Relação no WhatsApp",
+                    f"https://api.whatsapp.com/send?text={urllib.parse.quote(txt_mot_wpp)}",
+                )
+            with bm2:
+                st.caption("💡 Dica: Use 'Separar em Blocos (LOC + INT)' ou 'Apenas LOC / INT' para enviar direto no grupo correspondente.")
+
+        # Detalhamento de pacotes por motorista (Drill-down)
+        with st.expander(f"🔍 Detalhar Pacotes por Motorista ({len(df_rel_mot)} motoristas)", expanded=False):
+            lista_mots_sel = df_rel_mot["Motorista"].tolist()
+            mot_escolhido = st.selectbox(
+                "Selecione o motorista para inspecionar os pacotes:",
+                lista_mots_sel,
+                key=k("mot_drill_sel"),
+            )
+            if mot_escolhido:
+                df_pac_mot = dfv[dfv["Motorista_Limpo"] == mot_escolhido].sort_values(
+                    ["Backlog_Dias", "Prioridade"], ascending=[False, False]
+                )
+                cols_pac_mot = {
+                    "Base": "Base",
+                    "Waybill No": "Waybill",
+                    "Backlog_Dias": "Backlog (d)",
+                    "Faixa_Backlog": "Faixa",
+                    "Etapa": "Etapa",
+                    "Ocorrencia": "Ocorrência",
+                    "Tentativas": "Tentativas",
+                    "Acao_Sugerida": "Ação Sugerida",
+                    "Destination City": "Cidade",
+                    "Bairro_Display": "Bairro",
+                    "Endereco_Display": "Endereço",
+                    "Data_Display": "Entrada",
+                }
+                cols_pm_ok = [c for c in cols_pac_mot if c in df_pac_mot.columns]
+                st.dataframe(
+                    df_pac_mot[cols_pm_ok].rename(columns=cols_pac_mot),
+                    hide_index=True,
+                    use_container_width=True,
+                )
 
     # ---------------- TEXTO WHATSAPP ----------------
     with st.expander("📢 Copiar Status do Backlog para o Grupo do WhatsApp", expanded=False):
