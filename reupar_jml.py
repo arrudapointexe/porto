@@ -2,6 +2,7 @@ import pandas as pd
 import gspread
 import sync_time_patch
 from google_utils import get_gspread_client
+from acareacoes import eh_subtipo_ignorado
 import os
 from dotenv import load_dotenv
 
@@ -19,6 +20,8 @@ def reupar_dados(sigla):
         return
 
     df_local = pd.read_excel(caminho_excel)
+    if 'Subtipo' in df_local.columns:
+        df_local = df_local[~df_local['Subtipo'].apply(eh_subtipo_ignorado)].copy()
     dados_para_nuvem = [df_local.columns.values.tolist()] + df_local.fillna("").values.tolist()
     
     cliente = get_gspread_client()

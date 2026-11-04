@@ -46,6 +46,14 @@ SUBTIPOS_IGNORADOS = {
     "tt bra inquiry - priorities",
 }
 
+def eh_subtipo_ignorado(valor) -> bool:
+    texto = re.sub(r"\s+", " ", str(valor or "").strip().lower())
+    if not texto:
+        return False
+    if texto in SUBTIPOS_IGNORADOS:
+        return True
+    return bool(re.search(r"tt\s*bra\s*(prioridades|inquiry\s*[-–—]?\s*priorit)", texto, re.IGNORECASE))
+
 # ==============================================================
 # FUNÇÕES DE APOIO E DADOS
 # ==============================================================
@@ -133,7 +141,7 @@ def carregar_dados_base(nome_aba):
         # Filtra para não exibir tickets do tipo 'TT BRA Prioridades' ou 'TT BRA Inquiry - Prioritys'
         for col_sub in ['Subtipo', 'Tipo', 'Motivo']:
             if col_sub in df.columns:
-                df = df[~df[col_sub].astype(str).str.strip().str.lower().isin(SUBTIPOS_IGNORADOS)].copy()
+                df = df[~df[col_sub].apply(eh_subtipo_ignorado)].copy()
 
         return df
     except Exception as e: 
@@ -196,7 +204,7 @@ if menu == "📷 Portal do Motorista":
                     df_mot['Subtipo'] = "N/A"
                 df_mot['Subtipo'] = df_mot['Subtipo'].apply(lambda x: "N/A" if pd.isna(x) or str(x).strip() == "" else str(x).strip())
 
-                subtipos_unicos = sorted(df_mot['Subtipo'].unique())
+                subtipos_unicos = [s for s in sorted(df_mot['Subtipo'].unique()) if not eh_subtipo_ignorado(s)]
 
                 for subtipo_atual in subtipos_unicos:
                     df_sub = df_mot[df_mot['Subtipo'] == subtipo_atual]

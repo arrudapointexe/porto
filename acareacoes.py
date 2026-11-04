@@ -1,8 +1,20 @@
 import os
+import sys
 import time
 import pandas as pd
 import re
 from dotenv import load_dotenv
+
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 from playwright.sync_api import sync_playwright
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -12,6 +24,21 @@ from google_utils import get_gspread_client
 load_dotenv()
 
 NOME_PLANILHA = os.getenv("NOME_PLANILHA", "acareaBase")
+
+SUBTIPOS_IGNORADOS = {
+    "tt bra prioridades",
+    "tt bra inquiry - prioritys",
+    "tt bra inquiry - priorities",
+}
+
+
+def eh_subtipo_ignorado(valor) -> bool:
+    texto = re.sub(r"\s+", " ", str(valor or "").strip().lower())
+    if not texto:
+        return False
+    if texto in SUBTIPOS_IGNORADOS:
+        return True
+    return bool(re.search(r"tt\s*bra\s*(prioridades|inquiry\s*[-–—]?\s*priorit)", texto, re.IGNORECASE))
 
 
 def normalizar_codigo(codigo):
@@ -32,7 +59,7 @@ def extrair_awbs_da_planilha(valores):
             continue
 
         valor_normalizado = primeira_celula.lower()
-        if valor_normalizado in {"awb", "waybill", "codigo", "código", "tracking", "tracking number", "motorista", "nome", "telefone", "endereço", "produto", "valor", "prazo do processo", "subtipo"}:
+        if valor_normalizado in {"awb", "waybill", "codigo", "código", "tracking", "tracking number", "motorista", "nome", "telefone", "endereço", "produto", "valor", "prazo do processo", "subtipo", "número de referência", "numero de referencia", "nº de referência", "n° de referência", "referência", "referencia"}:
             continue
 
         awbs.add(normalizar_codigo(primeira_celula))
@@ -57,52 +84,155 @@ def filtrar_itens_novos(itens, awbs_existentes):
 
 
 def remover_awbs_ausentes_da_planilha(valores, awbs_ativos):
-    if not valores:
+    if not valores or len(valores) <= 1:
         return valores
 
-    awbs_ativos_norm = {normalizar_codigo(awb) for awb in awbs_ativos}
-    linhas_filtradas = []
+    header = [str(c).strip().lower() for c in valores[0]]
+    idx_awb = next((i for i, h in enumerate(header) if "awb" in h), 0)
+    idx_subtipo = next((i for i, h in enumerate(header) if "subtipo" in h or "sub_tipo" in h or "motivo" in h or "tipo" in h), -1)
 
-    for row in valores:
+    awbs_ativos_norm = {normalizar_codigo(awb) for awb in awbs_ativos}
+    linhas_filtradas = [valores[0]]
+
+    for row in valores[1:]:
         if not row:
             continue
 
-        primeira_celula = str(row[0]).strip()
-        if not primeira_celula:
+        if idx_subtipo >= 0 and len(row) > idx_subtipo and eh_subtipo_ignorado(row[idx_subtipo]):
+            continue
+
+        celula_awb = str(row[idx_awb]).strip() if len(row) > idx_awb else ""
+        if not celula_awb:
             linhas_filtradas.append(row)
             continue
 
-        valor_normalizado = primeira_celula.lower()
-        if valor_normalizado in {"awb", "waybill", "codigo", "código", "tracking", "tracking number", "motorista", "nome", "telefone", "endereço", "produto", "valor", "prazo do processo", "subtipo"}:
-            linhas_filtradas.append(row)
-            continue
-
-        if normalizar_codigo(primeira_celula) in awbs_ativos_norm:
+        if normalizar_codigo(celula_awb) in awbs_ativos_norm:
             linhas_filtradas.append(row)
 
     return linhas_filtradas
 
 
 def sincronizar_linhas_da_planilha(linhas_existentes, dados_para_nuvem, awbs_ativos):
+    if not dados_para_nuvem:
+        return linhas_existentes or []
+
+    header_nuvem = [str(c).strip() for c in dados_para_nuvem[0]]
+
     if not linhas_existentes:
         return dados_para_nuvem
+
+    header_existente = [str(c).strip() for c in linhas_existentes[0]]
+
+    # Validação de segurança: o cabeçalho existente DEVE conter 'AWB' e ter pelo menos 5 colunas.
+    # Caso contrário, a planilha está corrompida, vazia ou foi limpa incorretamente.
+    # Nesse caso, usamos a estrutura e dados completos de 'dados_para_nuvem'.
+    has_awb = any("awb" in h.lower() for h in header_existente)
+    if not has_awb or len(header_existente) < 5:
+        return dados_para_nuvem
+
+    # 1. Se existir uma coluna vazia (ex: adicionada recentemente entre AWB e Motorista), nomeia como 'Número de Referência'
+    if len(header_existente) > 1 and header_existente[1] == "":
+        header_existente[1] = "Número de Referência"
+
+    # 2. Se 'Número de Referência' não estiver presente no cabeçalho existente, insere logo após AWB
+    has_ref = any(
+        "referencia" in h.lower() or "referência" in h.lower() or "ref" in h.lower()
+        for h in header_existente
+    )
+    if not has_ref:
+        idx_awb = next((i for i, h in enumerate(header_existente) if "awb" in h.lower()), 0)
+        insert_idx = idx_awb + 1
+        header_existente.insert(insert_idx, "Número de Referência")
+        for r in linhas_existentes[1:]:
+            if len(r) > insert_idx:
+                r.insert(insert_idx, "")
+            else:
+                r.append("")
 
     linhas_ativas = remover_awbs_ausentes_da_planilha(linhas_existentes, awbs_ativos)
     linhas_finais = []
 
     if linhas_ativas:
-        linhas_finais.append(linhas_ativas[0])
+        linhas_finais.append(header_existente)
         linhas_finais.extend(linhas_ativas[1:])
     else:
-        linhas_finais.append(dados_para_nuvem[0])
+        linhas_finais.append(header_existente)
 
+    def criar_dict_linha(linha_valores):
+        d = {}
+        for idx, val in enumerate(linha_valores):
+            if idx < len(header_nuvem):
+                d[header_nuvem[idx]] = val
+        return d
+
+    def formatar_para_header_existente(d_valores):
+        nova_linha = []
+        for col_nome in header_existente:
+            col_norm = col_nome.lower()
+            val = ""
+            if "awb" in col_norm:
+                val = d_valores.get("AWB", "")
+            elif "referencia" in col_norm or "referência" in col_norm or "ref" in col_norm:
+                val = d_valores.get("Número de Referência", "")
+            elif "motorista" in col_norm:
+                val = d_valores.get("Motorista", "")
+            elif "subtipo" in col_norm or "sub_tipo" in col_norm:
+                val = d_valores.get("Subtipo", "")
+            elif "nome" in col_norm or "cliente" in col_norm:
+                val = d_valores.get("Nome", "")
+            elif "telefone" in col_norm or "tel" in col_norm:
+                val = d_valores.get("Telefone", "")
+            elif "endereco" in col_norm or "endereço" in col_norm:
+                val = d_valores.get("Endereco", "")
+            elif "produto" in col_norm:
+                val = d_valores.get("Produto", "")
+            elif "valor" in col_norm:
+                val = d_valores.get("Valor", "")
+            elif "prazo" in col_norm:
+                val = d_valores.get("Prazo do Processo", "")
+            else:
+                val = d_valores.get(col_nome, "")
+            nova_linha.append(val)
+        return nova_linha
+
+    idx_awb_existente = next((i for i, h in enumerate(header_existente) if "awb" in h.lower()), 0)
+    awbs_ja_na_lista = {normalizar_codigo(item[idx_awb_existente]) for item in linhas_finais[1:] if len(item) > idx_awb_existente}
+
+    # Mapa de dados novos para atualizar referências de linhas ativas que estavam vazias
+    novos_por_awb = {}
     if dados_para_nuvem[1:]:
         for linha in dados_para_nuvem[1:]:
             if not linha:
                 continue
-            codigo = normalizar_codigo(linha[0])
-            if codigo and codigo not in {normalizar_codigo(item[0]) for item in linhas_finais[1:] if item and item[0]}:
-                linhas_finais.append(linha)
+            d_linha = criar_dict_linha(linha)
+            codigo = normalizar_codigo(d_linha.get("AWB", ""))
+            if codigo:
+                novos_por_awb[codigo] = d_linha
+                if codigo not in awbs_ja_na_lista:
+                    linha_formatada = formatar_para_header_existente(d_linha)
+                    linhas_finais.append(linha_formatada)
+                    awbs_ja_na_lista.add(codigo)
+
+    # Preenche 'Número de Referência' nas linhas existentes caso estivesse vazio e agora tenha sido capturado
+    idx_ref = next((i for i, h in enumerate(header_existente) if "referencia" in h.lower() or "referência" in h.lower() or "ref" in h.lower()), -1)
+    if idx_ref >= 0:
+        for r in linhas_finais[1:]:
+            if len(r) > idx_awb_existente:
+                awb = normalizar_codigo(r[idx_awb_existente])
+                if awb in novos_por_awb:
+                    val_novo = novos_por_awb[awb].get("Número de Referência", "")
+                    if val_novo and val_novo != "N/A" and (idx_ref >= len(r) or not str(r[idx_ref]).strip() or str(r[idx_ref]).strip().upper() == "N/A"):
+                        if idx_ref < len(r):
+                            r[idx_ref] = val_novo
+                        else:
+                            r.extend([""] * (idx_ref - len(r)))
+                            r.append(val_novo)
+
+    # Garantir tamanho homogêneo das linhas
+    max_len = len(header_existente)
+    for r in linhas_finais:
+        if len(r) < max_len:
+            r.extend([""] * (max_len - len(r)))
 
     return linhas_finais
 
@@ -127,7 +257,10 @@ def enviar_para_google_sheets(df_final, sigla, bot=None, chat_id=None, awbs_ativ
                 if bot and chat_id: bot.send_message(chat_id, msg_nova_aba)
                 planilha = planilha_mestre.add_worksheet(title=sigla, rows="1000", cols="20")
             
-            dados_para_nuvem = [df_final.columns.values.tolist()] + df_final.fillna("").values.tolist()
+            dados_para_nuvem = [df_final.columns.values.tolist()] + [
+                [str(c) if c is not None else "" for c in row]
+                for row in df_final.fillna("").values.tolist()
+            ]
             linhas_existentes = planilha.get_all_values()
             awbs_ativos_norm = {normalizar_codigo(awb) for awb in (awbs_ativos or set())}
 
@@ -290,6 +423,8 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None, mod
 
             codigos_map = {}
             for item in codigos_prazos:
+                if eh_subtipo_ignorado(item.get('sub_tipo', '')):
+                    continue
                 codigo = str(item.get('codigo', '')).strip()
                 if codigo: codigos_map[codigo] = item
 
@@ -348,9 +483,73 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None, mod
                 if target_f:
                     page.wait_for_timeout(3000)
                     
-                    try: target_f.get_by_role("tab", name=re.compile(r"CUSTOMER INFO|INFORMAÇÕES DO CLIENTE", re.IGNORECASE)).first.click(force=True)
+                    # 1. ABA INFORMAÇÃO BÁSICA / BASIC INFO -> Extrair Número de Referência
+                    num_referencia = "N/A"
+                    try:
+                        try: target_f.get_by_role("tab", name=re.compile(r"BASIC INFO|INFORMAÇÃO BÁSICA|INFORMAÇÕES BÁSICAS|INFORMAÇÃO BASICA", re.IGNORECASE)).first.click(force=True)
+                        except: target_f.get_by_text(re.compile(r"BASIC INFO|INFORMAÇÃO BÁSICA|INFORMAÇÕES BÁSICAS|INFORMAÇÃO BASICA", re.IGNORECASE)).first.click(force=True)
+                        page.wait_for_timeout(1000)
                     except: pass
-                    page.wait_for_timeout(1000) 
+
+                    try:
+                        olho_ref = target_f.locator('.detail-item', has_text=re.compile(r"referência|referencia|reference", re.IGNORECASE)).locator('svg, [role="button"]').first
+                        if olho_ref.is_visible(timeout=800):
+                            olho_ref.click(force=True)
+                            page.wait_for_timeout(1000)
+                    except: pass
+
+                    try:
+                        num_referencia = target_f.evaluate('''() => {
+                            const termos = ["nº de referência", "n° de referência", "no de referencia", "número de referência", "numero de referencia", "reference no", "reference number", "ref no", "referência", "referencia", "reference"];
+                            
+                            // 1. Tentar por .detail-item
+                            const items = Array.from(document.querySelectorAll('.detail-item'));
+                            for (const item of items) {
+                                const text = (item.innerText || "").toLowerCase();
+                                if (termos.some(t => text.includes(t))) {
+                                    const valEl = item.querySelector('.value');
+                                    if (valEl && valEl.innerText.trim()) {
+                                        const v = valEl.innerText.replace(/\\*\\*\\*\\*/g, "").trim();
+                                        if (v && v !== "-") return v;
+                                    }
+                                    const lines = item.innerText.split('\\n').map(l => l.trim()).filter(Boolean);
+                                    if (lines.length > 1) {
+                                        const v = lines[lines.length - 1].replace(/\\*\\*\\*\\*/g, "").trim();
+                                        if (v && v !== "-" && !termos.some(t => v.toLowerCase().includes(t))) return v;
+                                    }
+                                }
+                            }
+                            
+                            // 2. Tentar por elementos genéricos
+                            const allNodes = Array.from(document.querySelectorAll('.ant-descriptions-item, .ant-form-item, div, tr, li'));
+                            for (const node of allNodes) {
+                                if (node.innerText && node.innerText.length < 150) {
+                                    const text = node.innerText.toLowerCase();
+                                    if (termos.some(t => text.includes(t))) {
+                                        const valEl = node.querySelector('.ant-descriptions-item-content, .value, dd, span:last-child');
+                                        if (valEl && valEl.innerText.trim()) {
+                                            const v = valEl.innerText.replace(/\\*\\*\\*\\*/g, "").trim();
+                                            if (v && v !== "-" && !termos.some(t => v.toLowerCase().includes(t))) return v;
+                                        }
+                                        const lines = node.innerText.split('\\n').map(l => l.trim()).filter(Boolean);
+                                        if (lines.length > 1) {
+                                            const v = lines[lines.length - 1].replace(/\\*\\*\\*\\*/g, "").trim();
+                                            if (v && v !== "-" && !termos.some(t => v.toLowerCase().includes(t))) return v;
+                                        }
+                                    }
+                                }
+                            }
+                            return "N/A";
+                        }''')
+                    except Exception as e:
+                        num_referencia = "N/A"
+
+                    # 2. ABA INFORMAÇÕES DO CLIENTE
+                    try: 
+                        try: target_f.get_by_role("tab", name=re.compile(r"CUSTOMER INFO|INFORMAÇÃO DO CLIENTE|INFORMAÇÕES DO CLIENTE", re.IGNORECASE)).first.click(force=True)
+                        except: target_f.get_by_text(re.compile(r"CUSTOMER INFO|INFORMAÇÃO DO CLIENTE|INFORMAÇÕES DO CLIENTE", re.IGNORECASE)).first.click(force=True)
+                        page.wait_for_timeout(1000)
+                    except: pass
                     
                     try: 
                         olho = target_f.locator('.detail-item', has_text=re.compile(r"Customer Name|Nome do Cliente", re.IGNORECASE)).locator('svg, [role="button"]').first
@@ -385,9 +584,10 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None, mod
                         };
                     }''')
 
+                    # 3. ABA INFORMAÇÕES DO PRODUTO
                     try:
-                        try: target_f.get_by_role("tab", name=re.compile(r"PRODUCT INFO|INFORMAÇÕES DO PRODUTO|PRODUTO", re.IGNORECASE)).first.click(force=True)
-                        except: target_f.get_by_text(re.compile(r"PRODUCT INFO|INFORMAÇÕES DO PRODUTO|PRODUTO", re.IGNORECASE)).first.click(force=True)
+                        try: target_f.get_by_role("tab", name=re.compile(r"PRODUCT INFO|INFORMAÇÃO DO PRODUTO|INFORMAÇÕES DO PRODUTO|PRODUTO", re.IGNORECASE)).first.click(force=True)
+                        except: target_f.get_by_text(re.compile(r"PRODUCT INFO|INFORMAÇÃO DO PRODUTO|INFORMAÇÕES DO PRODUTO|PRODUTO", re.IGNORECASE)).first.click(force=True)
                         page.wait_for_timeout(1000) 
                         
                         try:
@@ -422,10 +622,11 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None, mod
                         produto = "N/A"
                         valor = "0.00"
 
+                    # 4. ABA OPERAÇÃO (MOTORISTA)
                     prazo = prazo_da_linha if prazo_da_linha else "N/A"
                     try:
-                        try: target_f.get_by_role("tab", name=re.compile(r"OPS INFO|OPERAÇÃO", re.IGNORECASE)).first.click(force=True)
-                        except: target_f.get_by_text(re.compile(r"OPS INFO|OPERAÇÃO", re.IGNORECASE)).first.click(force=True)
+                        try: target_f.get_by_role("tab", name=re.compile(r"OPS INFO|OPERAÇÃO|OPERACOES|INFORMAÇÃO DE OPERAÇÃO", re.IGNORECASE)).first.click(force=True)
+                        except: target_f.get_by_text(re.compile(r"OPS INFO|OPERAÇÃO|OPERACOES|INFORMAÇÃO DE OPERAÇÃO", re.IGNORECASE)).first.click(force=True)
                         page.wait_for_timeout(1000)
                         
                         motorista = target_f.evaluate('''() => {
@@ -439,6 +640,7 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None, mod
 
                     dados_finais_excel.append({
                         "AWB": codigo,
+                        "Número de Referência": num_referencia,
                         "Motorista": motorista,
                         "Subtipo": sub_tipo_da_linha, 
                         "Nome": dados_cli['nome'],
