@@ -549,16 +549,24 @@ def render_aba_backlog(df_base, contexto="", key_prefix="bk"):
         with fc3:
             f_visao = st.selectbox("👁️ Visão:", ["Tudo", "🏢 Só Piso", "🚚 Só Em Rota"], key=k("f_visao"))
 
-        fd1, fd2, fd3, fd4 = st.columns([3, 2, 2, 3])
+        fd1, fd2, fd3, fd4, fd5 = st.columns([3, 3, 1.5, 1.5, 2.5])
         with fd1:
+            df_opcoes_mot = df[df["Base"].isin(f_bases)] if f_bases else df
+            mots_disp = sorted(
+                [m for m in df_opcoes_mot["Motorista_Limpo"].dropna().unique().tolist() if m and m != "Não Atribuído"]
+            )
+            if "Não Atribuído" in set(df_opcoes_mot["Motorista_Limpo"]):
+                mots_disp.append("Não Atribuído")
+            f_mots = st.multiselect("👨‍✈️ Motorista (vazio = todos):", mots_disp, key=k("f_mot"))
+        with fd2:
             ocs_disp = df["Ocorrencia"].value_counts().index.tolist()
             f_ocs = st.multiselect("⚠️ Ocorrência (vazio = todas):", ocs_disp, key=k("f_oc"))
-        with fd2:
+        with fd3:
             equipes_disp = ["Todas"] + sorted([e for e in df["Equipe"].unique().tolist() if e])
             f_equipe = st.selectbox("👥 Equipe:", equipes_disp, key=k("f_equipe"))
-        with fd3:
-            f_min = st.number_input("⏱️ Backlog mínimo (dias):", min_value=0, value=0, step=1, key=k("f_min"))
         with fd4:
+            f_min = st.number_input("⏱️ Backlog mín. (d):", min_value=0, value=0, step=1, key=k("f_min"))
+        with fd5:
             f_busca = st.text_input("🔎 Buscar (AWB, motorista, cidade, bairro):", key=k("f_busca"),
                                     placeholder="Ex: 6102..., Centro, João...")
 
@@ -583,6 +591,8 @@ def render_aba_backlog(df_base, contexto="", key_prefix="bk"):
         dfv = dfv[~dfv["is_rota"].astype(bool)]
     elif f_visao == "🚚 Só Em Rota":
         dfv = dfv[dfv["is_rota"].astype(bool)]
+    if f_mots:
+        dfv = dfv[dfv["Motorista_Limpo"].isin(f_mots)]
     if f_ocs:
         dfv = dfv[dfv["Ocorrencia"].isin(f_ocs)]
     if f_equipe != "Todas":
@@ -775,7 +785,7 @@ def render_aba_backlog(df_base, contexto="", key_prefix="bk"):
             key=k("mot_qtd_graf"),
         )
 
-    incluir_na = "Incluir Não Atribuído" in escopo_mot
+    incluir_na = ("Incluir Não Atribuído" in escopo_mot) or ("Não Atribuído" in f_mots)
     df_rel_mot = construir_relacao_motoristas_backlog(dfv, incluir_nao_atribuido=incluir_na)
 
     if not df_rel_mot.empty and eq_mot != "Todas":
