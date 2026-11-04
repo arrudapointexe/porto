@@ -25,6 +25,12 @@ try:
 except Exception:
     buscar_dados_contato_imile = None
 
+try:
+    from aba_backlog import render_aba_backlog
+except Exception as _e_bk:
+    print(f"Aviso: aba_backlog indisponível: {_e_bk}")
+    render_aba_backlog = None
+
 # ==========================================
 # CONFIGURAÇÃO DA PÁGINA STREAMLIT
 # ==========================================
@@ -559,9 +565,10 @@ def render_dashboard():
     st.markdown("<div style='margin-bottom: 25px;'></div>", unsafe_allow_html=True)
 
     # Abas
-    tab_rota, tab_piso, tab_busca = st.tabs([
+    tab_rota, tab_piso, tab_backlog, tab_busca = st.tabs([
         "🚚 Aging em Rota (Entregadores)",
         "🏢 Piso por Bairro (Base Itabira)",
+        "📊 Status por Backlog",
         "🔍 Consulta Rápida (AWB)"
     ])
 
@@ -570,6 +577,12 @@ def render_dashboard():
 
     with tab_piso:
         render_aba_piso(df_piso)
+
+    with tab_backlog:
+        if render_aba_backlog:
+            render_aba_backlog(df_itr, "ITR", key_prefix="bk_itr")
+        else:
+            st.error("Módulo aba_backlog.py não encontrado.")
 
     with tab_busca:
         render_aba_busca(df_itr)
