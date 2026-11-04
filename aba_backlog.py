@@ -6,6 +6,7 @@ com a etapa atual do pacote (Last scan type), ocorrências (Last Problem Reason)
 tentativas de entrega (OFD Count), equipe (LOC/INT) e valor declarado.
 """
 import io
+import os
 import re
 import urllib.parse
 from datetime import datetime
@@ -14,6 +15,16 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
+
+try:
+    import config
+except ImportError:
+    config = None
+
+try:
+    from scraper_contato import buscar_dados_contato_imile
+except Exception:
+    buscar_dados_contato_imile = None
 
 # ==========================================
 # DICIONÁRIOS / CONSTANTES
@@ -249,6 +260,185 @@ def _excel_bytes(df):
     with pd.ExcelWriter(out, engine="openpyxl") as w:
         df.to_excel(w, index=False, sheet_name="Backlog")
     return out.getvalue()
+
+
+def _obter_credenciais_base(sigla_base):
+    sigla = _txt(sigla_base).upper() or "ITR"
+    try:
+        u_sec = st.secrets.get(f"IMILE_{sigla}_USER")
+        s_sec = st.secrets.get(f"IMILE_{sigla}_PASS") or st.secrets.get(f"{sigla}_IMILE_PASS")
+        if u_sec and s_sec:
+            return u_sec, s_sec
+    except Exception:
+        pass
+    if config and hasattr(config, "BASES_SLA"):
+        for b, u, s in config.BASES_SLA:
+            if str(b).strip().upper() == sigla and u and s:
+                return u, s
+    return os.getenv("IMILE_ITR_USER"), os.getenv("ITR_IMILE_PASS")
+
+
+def _gerar_link_whatsapp(telefone, nome, awb, endereco, base_sigla="", produto=""):
+    tel_limpo = "".join(filter(str.isdigit, str(telefone or "")))
+    if not tel_limpo:
+        return None
+    if not tel_limpo.startswith("55") and len(tel_limpo) <= 11:
+        tel_limpo = f"55{tel_limpo}"
+    nome_fmt = nome if nome and nome != "N/A" else "Cliente"
+    prod_fmt = f"\n📦 *Produto:* {produto}" if produto and produto != "N/A" else ""
+    end_fmt = f"\n📍 *Endereço:* {endereco}" if endereco and endereco != "N/A" else ""
+    base_info = f" (Base {base_sigla})" if base_sigla else ""
+    msg = (
+        f"Olá {nome_fmt}, sou da equipe de entregas da *Porto Guimarães Express*{base_info}.\n"
+        f"Estamos acompanhando seu pedido:{prod_fmt}\n"
+        f"🔖 *Rastreio:* {awb}{end_fmt}\n\n"
+        f"Gostaria de confirmar se você já recebeu esta encomenda ou se precisa de auxílio com a entrega?"
+    )
+    return f"https://wa.me/{tel_limpo}?text={urllib.parse.quote(msg)}"
+
+
+def render_ficha_pedido(row, key_prefix="ficha"):
+    """Exibe painel completo de informações do pedido clicado na planilha."""
+    awb = _txt(row.get("Waybill No", ""))
+    base_pkg = _txt(row.get("Base", "ITR")) or "ITR"
+    bk_dias = int(row.get("Backlog_Dias", 0))
+    ag_dias = int(_num(pd.Series([row.get("aging", 0)])).fillna(0).iloc[0])
+    faixa = _txt(row.get("Faixa_Backlog", ""))
+    etapa = _txt(row.get("Etapa", ""))
+    scan_raw = _txt(row.get("Last scan type", ""))
+    status_wb = _txt(row.get("Waybill Status", "")) or "—"
+    acao = _txt(row.get("Acao_Sugerida", ""))
+    mot = _txt(row.get("Motorista_Limpo", "")) or "Não Atribuído"
+    mot_raw = _txt(row.get("Driver Name", "")) or "—"
+    mot_id = _txt(row.get("Driver Id", "")) or "—"
+    equipe = _txt(row.get("Equipe", "")) or "—"
+    rota_cod = _txt(row.get("Route Code", "")) or "—"
+    operador = _txt(row.get("Operator", "")) or "—"
+    fornecedor = _txt(row.get("Driver Supplier", "")) or "—"
+    cidade = _txt(row.get("Destination City", "")) or "—"
+    bairro = _txt(row.get("Bairro_Display", "")) or _txt(row.get("Consignee Area", "")) or "—"
+    cep = _txt(row.get("Destination Zipcode", "")) or "—"
+    uf = _txt(row.get("Consignee Province", "")) or "—"
+    endereco = _txt(row.get("Endereco_Display", "")) or _txt(row.get("Consignee Address_y", "")) or _txt(row.get("Consignee Address_x", "")) or "—"
+    dt_entrada = _txt(row.get("Data_Display", "")) or _txt(row.get("Receive Date", "")) or "—"
+    ocorrencia = _txt(row.get("Ocorrencia", "")) or SEM_OCORRENCIA
+    motivo_raw = _txt(row.get("Last Problem Reason", "")) or "—"
+    tipo_oc = _txt(row.get("Tipo_Ocorrencia", "")) or _txt(row.get("Last Problem Type", "")) or "—"
+    tentativas = int(row.get("Tentativas", 0))
+    cliente_cod = _txt(row.get("Client Code", "")) or "—"
+    valor_dec = _brl(row.get("Valor_Declarado", 0))
+    tipo_fech = _txt(row.get("Type", "")) or "—"
+    ndr_val = _txt(row.get("ndr", "")) or "—"
+    fora_rota = bool(row.get("Fora_Rota", False))
+    abrang_txt = "⚠️ Fora de Abrangência (Inversão)" if fora_rota else "✅ Dentro da Abrangência"
+
+    cor_borda = "#ef4444" if bk_dias >= LIMIAR_CRITICO else ("#f97316" if bk_dias >= 2 else "#38bdf8")
+
+    st.markdown(f"""
+        <div style="background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+                    border: 1px solid #334155; border-left: 6px solid {cor_borda};
+                    border-radius: 12px; padding: 18px 22px; margin: 12px 0 14px 0;
+                    box-shadow: 0 6px 20px rgba(0,0,0,0.35);">
+            <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px;">
+                <div>
+                    <span style="font-size: 0.8rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.06em;">
+                        🗂️ Ficha Completa do Pedido Selecionado
+                    </span>
+                    <div style="font-size: 1.45rem; font-weight: 800; color: #f8fafc; margin-top: 2px;">
+                        Waybill: <span style="color: #38bdf8;">{awb}</span>
+                        <span class="badge badge-base" style="margin-left: 8px; vertical-align: middle;">Base {base_pkg}</span>
+                    </div>
+                </div>
+                <div style="text-align: right;">
+                    <span class="badge" style="background: rgba(239,68,68,0.2); color: #fca5a5; border: 1px solid {cor_borda}; font-size: 0.9rem; padding: 5px 12px;">
+                        ⏳ Backlog: {bk_dias}d ({faixa})
+                    </span>
+                    <span class="badge badge-piso" style="font-size: 0.9rem; padding: 5px 12px;">
+                        {etapa}
+                    </span>
+                    <span class="badge badge-aviso" style="font-size: 0.9rem; padding: 5px 12px;">
+                        {acao}
+                    </span>
+                </div>
+            </div>
+            <hr style="border-color: #334155; margin: 14px 0;">
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; color: #cbd5e1; font-size: 0.92rem;">
+                <div style="background: rgba(15,23,42,0.55); padding: 12px 14px; border-radius: 8px; border: 1px solid #1e293b;">
+                    <div style="color: #38bdf8; font-weight: 700; margin-bottom: 6px;">📍 Destinatário & Localização</div>
+                    <div><b>Cidade / UF:</b> {cidade} ({uf})</div>
+                    <div><b>Bairro:</b> {bairro}</div>
+                    <div><b>CEP:</b> {cep}</div>
+                    <div><b>Endereço:</b> {endereco}</div>
+                    <div><b>Abrangência:</b> {abrang_txt}</div>
+                </div>
+                <div style="background: rgba(15,23,42,0.55); padding: 12px 14px; border-radius: 8px; border: 1px solid #1e293b;">
+                    <div style="color: #4ade80; font-weight: 700; margin-bottom: 6px;">🚚 Motorista & Operação</div>
+                    <div><b>Motorista:</b> {mot} (Equipe: <b>{equipe}</b>)</div>
+                    <div><b>Nome Original / ID:</b> {mot_raw} ({mot_id})</div>
+                    <div><b>Rota / Operador:</b> {rota_cod} | {operador}</div>
+                    <div><b>Transportadora:</b> {fornecedor}</div>
+                    <div><b>Entrada Base:</b> {dt_entrada} | <b>Aging:</b> {ag_dias}d</div>
+                </div>
+                <div style="background: rgba(15,23,42,0.55); padding: 12px 14px; border-radius: 8px; border: 1px solid #1e293b;">
+                    <div style="color: #fb923c; font-weight: 700; margin-bottom: 6px;">⚠️ Ocorrências & Dados do Pedido</div>
+                    <div><b>Ocorrência:</b> {ocorrencia} <small style="color:#94a3b8;">({motivo_raw})</small></div>
+                    <div><b>Tipo de Problema:</b> {tipo_oc}</div>
+                    <div><b>Tentativas (OFD Count):</b> {tentativas} | <b>NDR:</b> {ndr_val}</div>
+                    <div><b>Status Waybill / Tipo:</b> {status_wb} ({tipo_fech}) | <b>Scan:</b> {scan_raw}</div>
+                    <div><b>Cliente (Embarcador):</b> {cliente_cod} | <b>Valor:</b> <span style="color:#4ade80; font-weight:700;">{valor_dec}</span></div>
+                </div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+    ca1, ca2, ca3 = st.columns([3, 3, 4])
+    with ca1:
+        k_wpp_cache = f"wpp_ficha_bk_{awb}"
+        if k_wpp_cache in st.session_state:
+            st.markdown(st.session_state[k_wpp_cache], unsafe_allow_html=True)
+        else:
+            if st.button(f"📱 Buscar Contato / WhatsApp ({awb})", key=f"{key_prefix}_btn_wpp_{awb}"):
+                u, s = _obter_credenciais_base(base_pkg)
+                if not u or not s:
+                    st.error(f"Sem credenciais configuradas para a base {base_pkg}.")
+                elif not buscar_dados_contato_imile:
+                    st.error("Módulo de busca de contato não disponível.")
+                else:
+                    with st.spinner("Consultando telefone e cliente na iMile..."):
+                        try:
+                            res = buscar_dados_contato_imile(awb, u, s)
+                        except Exception as e_err:
+                            res = {"erro": str(e_err), "telefone": "N/A"}
+                    if not res.get("telefone") or res["telefone"] == "N/A":
+                        st.warning(f"⚠️ {res.get('erro', 'Telefone não localizado na iMile.')}")
+                    else:
+                        link = _gerar_link_whatsapp(
+                            res["telefone"], res.get("nome", ""), awb, endereco, base_pkg, res.get("produto", "")
+                        )
+                        if link:
+                            nome_cli = res.get("nome", "Cliente")
+                            prod_cli = res.get("produto", "N/A")
+                            html_btn = (
+                                f'<a href="{link}" target="_blank" class="wpp-btn">'
+                                f'💬 Abrir WhatsApp ({nome_cli} — {res["telefone"]})</a>'
+                                f'<div style="font-size:0.8rem; color:#94a3b8; margin-top:4px;">📦 Produto: <b>{prod_cli}</b></div>'
+                            )
+                            st.session_state[k_wpp_cache] = html_btn
+                            st.markdown(html_btn, unsafe_allow_html=True)
+    with ca2:
+        st.link_button(
+            f"🌐 Abrir Waybill {awb} no Portal iMile",
+            "https://ds.imile.com/#/DSOperation/WaybillManagement/dsTrackQuery",
+        )
+    with ca3:
+        with st.expander("📄 Ver todas as colunas brutas da planilha (igual Excel)"):
+            cols_internas = {"_motivo_raw", "_tipo_raw"}
+            linhas_brutas = [
+                {"Coluna da Planilha": str(col), "Valor": _txt(val) or "—"}
+                for col, val in row.items()
+                if col not in cols_internas
+            ]
+            st.dataframe(pd.DataFrame(linhas_brutas), hide_index=True, use_container_width=True, height=320)
 
 
 # ==========================================
@@ -869,13 +1059,17 @@ def render_aba_backlog(df_base, contexto="", key_prefix="bk"):
             ]
             if c in df_rel_mot.columns and (c != "Base" or multi_base)
         ]
-        df_rel_view = df_rel_mot[cols_mot_exibir]
+        df_rel_view = df_rel_mot[cols_mot_exibir].reset_index(drop=True)
 
-        st.dataframe(
+        st.caption("👆 **Clique em qualquer linha de motorista abaixo** (na caixinha à esquerda da linha) para abrir a lista de pacotes daquele motorista:")
+        ev_mot = st.dataframe(
             df_rel_view,
             hide_index=True,
             use_container_width=True,
             height=min(560, 42 + 35 * len(df_rel_view)),
+            on_select="rerun",
+            selection_mode="single-row",
+            key=k("df_rel_mot_sel"),
             column_config={
                 "% Crítico": st.column_config.ProgressColumn("% Crítico", min_value=0, max_value=100, format="%.0f%%"),
                 "Médio (d)": st.column_config.NumberColumn("Médio (d)", format="%.1f"),
@@ -883,6 +1077,43 @@ def render_aba_backlog(df_base, contexto="", key_prefix="bk"):
                 "Valor (R$)": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f"),
             },
         )
+
+        linhas_mot_sel = ev_mot.selection.rows if ev_mot and hasattr(ev_mot, "selection") else []
+        if linhas_mot_sel:
+            idx_m = linhas_mot_sel[0]
+            if 0 <= idx_m < len(df_rel_view):
+                mot_clicado = str(df_rel_view.iloc[idx_m]["Motorista"])
+                st.markdown(f"##### 📦 Pacotes de **{mot_clicado}** (clique em um pacote para abrir a ficha completa)")
+                df_pac_clicado = dfv[dfv["Motorista_Limpo"] == mot_clicado].sort_values(
+                    ["Backlog_Dias", "Prioridade"], ascending=[False, False]
+                ).reset_index(drop=True)
+                cols_pac_c = {
+                    "Base": "Base",
+                    "Waybill No": "Waybill",
+                    "Backlog_Dias": "Backlog (d)",
+                    "Faixa_Backlog": "Faixa",
+                    "Etapa": "Etapa",
+                    "Ocorrencia": "Ocorrência",
+                    "Tentativas": "Tentativas",
+                    "Acao_Sugerida": "Ação Sugerida",
+                    "Destination City": "Cidade",
+                    "Bairro_Display": "Bairro",
+                    "Endereco_Display": "Endereço",
+                    "Valor_Declarado": "Valor (R$)",
+                    "Data_Display": "Entrada",
+                }
+                cols_pc_ok = [c for c in cols_pac_c if c in df_pac_clicado.columns]
+                ev_pac_mot = st.dataframe(
+                    df_pac_clicado[cols_pc_ok].rename(columns=cols_pac_c),
+                    hide_index=True,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key=k(f"df_pac_mot_click_{idx_m}"),
+                )
+                sel_pm = ev_pac_mot.selection.rows if ev_pac_mot and hasattr(ev_pac_mot, "selection") else []
+                if sel_pm and 0 <= sel_pm[0] < len(df_pac_clicado):
+                    render_ficha_pedido(df_pac_clicado.iloc[sel_pm[0]], key_prefix=k("ficha_mot_click"))
 
         cb_dl1, cb_dl2 = st.columns([4, 6])
         with cb_dl1:
@@ -968,7 +1199,7 @@ def render_aba_backlog(df_base, contexto="", key_prefix="bk"):
             if mot_escolhido:
                 df_pac_mot = dfv[dfv["Motorista_Limpo"] == mot_escolhido].sort_values(
                     ["Backlog_Dias", "Prioridade"], ascending=[False, False]
-                )
+                ).reset_index(drop=True)
                 cols_pac_mot = {
                     "Base": "Base",
                     "Waybill No": "Waybill",
@@ -984,11 +1215,18 @@ def render_aba_backlog(df_base, contexto="", key_prefix="bk"):
                     "Data_Display": "Entrada",
                 }
                 cols_pm_ok = [c for c in cols_pac_mot if c in df_pac_mot.columns]
-                st.dataframe(
+                st.caption("👆 Clique em qualquer linha abaixo para abrir a Ficha Completa do Pedido:")
+                ev_drill = st.dataframe(
                     df_pac_mot[cols_pm_ok].rename(columns=cols_pac_mot),
                     hide_index=True,
                     use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key=k("df_drill_pac_sel"),
                 )
+                sel_dr = ev_drill.selection.rows if ev_drill and hasattr(ev_drill, "selection") else []
+                if sel_dr and 0 <= sel_dr[0] < len(df_pac_mot):
+                    render_ficha_pedido(df_pac_mot.iloc[sel_dr[0]], key_prefix=k("ficha_drill"))
 
     # ---------------- TEXTO WHATSAPP ----------------
     with st.expander("📢 Copiar Status do Backlog para o Grupo do WhatsApp", expanded=False):
@@ -1056,21 +1294,36 @@ def render_aba_backlog(df_base, contexto="", key_prefix="bk"):
         "Valor_Declarado": "Valor (R$)",
         "Data_Display": "Entrada",
     }
+    dfl = dfl.reset_index(drop=True)
     cols_ok = [c for c in colunas if c in dfl.columns]
     df_show = dfl[cols_ok].rename(columns=colunas)
     max_bk = int(max(1, dfv["Backlog_Dias"].max()))
 
     with lo2:
-        st.markdown(f"<div style='padding-top: 32px;'><b>{len(df_show)}</b> pacotes no filtro</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='padding-top: 32px;'><b>{len(df_show)}</b> pacotes no filtro — "
+            f"<span style='color:#38bdf8;'>👆 clique em qualquer linha da planilha para abrir a Ficha Completa do Pedido</span></div>",
+            unsafe_allow_html=True,
+        )
 
-    st.dataframe(
-        df_show, hide_index=True, use_container_width=True, height=min(620, 38 + 35 * len(df_show)),
+    ev_fila = st.dataframe(
+        df_show,
+        hide_index=True,
+        use_container_width=True,
+        height=min(620, 38 + 35 * len(df_show)),
+        on_select="rerun",
+        selection_mode="single-row",
+        key=k("df_fila_sel"),
         column_config={
             "Backlog (d)": st.column_config.ProgressColumn("Backlog (d)", min_value=0, max_value=max_bk, format="%d d"),
             "Valor (R$)": st.column_config.NumberColumn("Valor (R$)", format="%.2f"),
             "Tentativas": st.column_config.NumberColumn("Tentativas", format="%d"),
         },
     )
+
+    sel_fila = ev_fila.selection.rows if ev_fila and hasattr(ev_fila, "selection") else []
+    if sel_fila and 0 <= sel_fila[0] < len(dfl):
+        render_ficha_pedido(dfl.iloc[sel_fila[0]], key_prefix=k("ficha_fila"))
 
     st.download_button(
         label="📥 Baixar Backlog Filtrado (Excel)",
