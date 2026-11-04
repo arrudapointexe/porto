@@ -10,7 +10,10 @@ import base64
 import requests
 from datetime import datetime, timedelta
 import plotly.express as px
-import sync_time_patch  # Fix Google Auth time offset
+try:
+    import sync_time_patch  # Fix Google Auth time offset
+except ImportError:
+    pass
 
 # ==============================================================
 # CONFIGURAÇÃO DA PÁGINA (Deve ser a primeira linha do Streamlit)
@@ -33,12 +36,27 @@ except:
     URL_WEBHOOK_DRIVE = os.getenv("URL_WEBHOOK_DRIVE", "")
     URL_SITE = os.getenv("URL_SITE", "https://imileacarea.streamlit.app")
 
-# 🔥 CORREÇÃO 1: As 11 bases da rede em ordem alfabética
-BASES_DISPONIVEIS = ["CPH", "CTG", "CTP", "GNH", "GVR", "ITR", "JML", "MNT", "QHG", "RBN", "TFO"]
+# 🔥 CORREÇÃO 1: As bases da rede em ordem alfabética
+BASES_DISPONIVEIS = ["BIM", "CPH", "CTG", "CTP", "GNH", "GVR", "ITR", "JML", "MNT", "QHG", "RBN", "SNB", "TFO"]
+
+# Subtipos de tickets que NÃO devem aparecer no portal
+SUBTIPOS_IGNORADOS = {
+    "tt bra prioridades",
+    "tt bra inquiry - prioritys",
+    "tt bra inquiry - priorities",
+}
 
 # ==============================================================
 # FUNÇÕES DE APOIO E DADOS
 # ==============================================================
+def obter_num_referencia(d):
+    for col in ['Número de Referência', 'Numero de Referencia', 'Nº de Referência', 'N° de Referência', 'Referência', 'Referencia']:
+        if col in d:
+            val = str(d[col]).strip()
+            if val and val.lower() not in ['nan', 'none', 'n/a', '-']:
+                return val
+    return ""
+
 def obter_credenciais():
     try:
         with open('credenciais.json') as f:
@@ -111,6 +129,12 @@ def carregar_dados_base(nome_aba):
         df.columns = df.columns.astype(str).str.strip()
         if 'Motorista' in df.columns:
             df['Motorista'] = df['Motorista'].astype(str).str.strip()
+
+        # Filtra para não exibir tickets do tipo 'TT BRA Prioridades' ou 'TT BRA Inquiry - Prioritys'
+        for col_sub in ['Subtipo', 'Tipo', 'Motivo']:
+            if col_sub in df.columns:
+                df = df[~df[col_sub].astype(str).str.strip().str.lower().isin(SUBTIPOS_IGNORADOS)].copy()
+
         return df
     except Exception as e: 
         st.error(f"Erro ao acessar Google Sheets: {e}")
@@ -179,10 +203,18 @@ if menu == "📷 Portal do Motorista":
                     st.markdown(f"<h3 style='color: #0068C9; margin-top: 25px; border-bottom: 2px solid #0068C9; padding-bottom: 5px;'>🏷️ {subtipo_atual} <span style='color: gray; font-size: 16px;'>({len(df_sub)} pacote(s))</span></h3>", unsafe_allow_html=True)
 
                     for idx, row in df_sub.iterrows():
-                        with st.expander(f"🔵 iMile | Pacote: {row['AWB']} - {row['Nome']}", expanded=False):
+                        num_ref = obter_num_referencia(row)
+                        titulo_expander = f"🔵 iMile | Pacote: {row['AWB']}"
+                        if num_ref:
+                            titulo_expander += f" (Ref: {num_ref})"
+                        titulo_expander += f" - {row['Nome']}"
+
+                        with st.expander(titulo_expander, expanded=False):
                             prazo_texto = formatar_prazo(row.get('Prazo do Processo', ''))
 
                             st.info(f"⏰ PRAZO DE FECHAMENTO: {prazo_texto}")
+                            if num_ref:
+                                st.info(f"📄 Nº DE REFERÊNCIA: {num_ref}")
                             st.info(f"💰 VALOR DO PACOTE: RS {row.get('Valor', '0.00')} + R$ 100,00 MULTA")
 
                             st.markdown("### 📷 Enviar Comprovante")
@@ -204,16 +236,31 @@ if menu == "📷 Portal do Motorista":
                             else: tel_cliente = ''
 
                             bairro = str(row.get('Bairro', 'N/A')).strip()
-                            msg_cliente = (
-                                f"Olá, somos uma transportadora parceira (SHEIN/TIKTOK)\n\n"
-                                f"{row['Nome']}, poderia confirmar o recebimento da mercadoria com os dados abaixo:\n"
-                                f"Código do pacote: {row['AWB']}\n"
-                                f"Endereço: {row.get('Endereco', 'N/A')}\n"
-                                f"Bairro: {bairro}\n"
-                                f"Telefone: {tel_bruto}\n\n"
-                                f"Produto: {row.get('Produto', 'N/A')}\n\n"
-                                f"Confirma o Recebimento do produto? SIM OU NÃO"
-                            )
+                            subtipo_pacote = str(row.get('Subtipo', '')).strip()
+                            linha_ref_msg = f"Nº de referência: {num_ref}\n" if num_ref else ""
+
+                            if subtipo_pacote not in ["TT BRA Fake Delivery", "TT BRA Inquiry - order Delivered but not received", "Baixa Indevida", "Fake Delivery", "TT BRA Complaint order Delivered but not received", "N/A"]:
+                                msg_cliente = (
+                                    f"Olá! Boa tarde!\n"
+                                    f"Sou da iMile. Neste número estou falando com {row['Nome']}?\n\n"
+                                    f"Sobre a reclamação de avaria, gostaria de confirmar algumas informações:\n"
+                                    f"AWB: {row['AWB']}\n"
+                                    f"{linha_ref_msg}"
+                                    f"Produto: {row.get('Produto', 'N/A')}\n\n"
+                                    f"Você confirma que o pacote foi entregue em perfeitas condições, sem avarias, amassados ou violação? O motorista foi cordial?"
+                                )
+                            else:
+                                msg_cliente = (
+                                    f"Olá, somos da transportadora PORTO GUIMARÃES EXPRESS,uma parceira IMILE.  \n"
+                                    f"{row['Nome']}, poderia confirmar o recebimento da mercadoria com os dados abaixo:\n"
+                                    f"Código do pacote: {row['AWB']}\n"
+                                    f"{linha_ref_msg}"
+                                    f"Endereço: {row.get('Endereco', 'N/A')}\n"
+                                    f"Telefone: {tel_bruto}\n\n"
+                                    f"Produto: {row.get('Produto', 'N/A')}\n"
+                                    f"Confirma o Recebimento do produto? SIM OU NÃO"
+                                )
+
                             st.code(msg_cliente, language="text") 
 
                             col1, col2 = st.columns(2)
@@ -223,7 +270,8 @@ if menu == "📷 Portal do Motorista":
                                 else:
                                     st.error("Telefone indisponível")
                             with col2:
-                                msg_base = f"Base, segue comprovante do pacote {row['AWB']}."
+                                ref_info = f" (Ref: {num_ref})" if num_ref else ""
+                                msg_base = f"Base, segue comprovante do pacote {row['AWB']}{ref_info}."
                                 numero_whats = NUMERO_BASE_CTG if base_atual == "CTG" else NUMERO_BASE
                                 st.link_button("2️⃣ Avisar Base", f"https://wa.me/{numero_whats}?text={urllib.parse.quote(msg_base)}")
         else:
@@ -400,6 +448,8 @@ elif menu == "💬 Gerador de Mensagens":
                 if awb_selecionado != "-- Escolha --":
                     linha = df_mot[df_mot['AWB'] == awb_selecionado].iloc[0]
                     
+                    num_ref = obter_num_referencia(linha)
+                    ref_texto = num_ref if num_ref else "N/A"
                     prazo_texto = formatar_prazo(linha.get('Prazo do Processo', ''))
                     produto = str(linha.get('Produto', 'N/A')).strip()
                     telefone = str(linha.get('Telefone', 'N/A')).strip()
@@ -410,6 +460,7 @@ elif menu == "💬 Gerador de Mensagens":
                     texto_gerado = f"""🚨 *Acareação iMile Pendente* 🚨
 
 📦 *Código:* {awb_selecionado}
+📄 *Nº de Referência:* {ref_texto}
 🏷️ *Produto:* {produto}
 💰 *Valor:* R$ {valor}
 📞 *Telefone:* {telefone}
@@ -422,7 +473,7 @@ Acesse o portal do motorista pelo link abaixo e envie o seu comprovante (print o
 🌐 *Link do Portal:* {URL_SITE}/?base={base_atual}
 
 *Regras para o Comprovante:*
-1️⃣ *Print do WhatsApp:* A conversa com o cliente deve confirmar o recebimento (com código do pedido, nome e telefone). O contato NÃO pode estar salvo na sua agenda e o número deve ser o mesmo do sistema.
+1️⃣ *Print do WhatsApp:* A conversa com o cliente deve confirmar o recebimento (com código do pedido, nome e telefone). O contato NÃO pode estar salvo na sua agenda e o número deve ser o mesmo do sistema (No formato +55 xx xxxx-xxxx).
 2️⃣ *Protocolo Escrito:* Preencha todos os dados corretamente (pegue impresso na base). O cabeçalho NÃO pode ser preenchido pelo cliente. É obrigatória uma foto da folha do protocolo e outra da folha com a fachada atrás.
 
 ⚠️ *ATENÇÃO:* Caso não seja respondido no prazo e da forma correta, o pacote será dado como extraviado em seu nome + MULTA de R$100,00 por baixa indevida. O valor será descontado!"""
