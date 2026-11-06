@@ -236,11 +236,11 @@ def preparar_backlog(df_in):
 def _layout(fig, altura):
     fig.update_layout(
         template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(t=30, b=10, l=10, r=10),
+        paper_bgcolor="#0f172a",
+        plot_bgcolor="#0f172a",
+        margin=dict(t=35, b=15, l=15, r=25),
         height=altura,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=11)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=12, color="#f8fafc")),
     )
     return fig
 
@@ -1008,31 +1008,69 @@ def render_aba_backlog(df_base, contexto="", key_prefix="bk"):
             df_graf_m = df_graf_m.head(25)
         elif qtd_graf_mot == "Top 40":
             df_graf_m = df_graf_m.head(40)
-        df_graf_m = df_graf_m.iloc[::-1]
+        df_graf_m = df_graf_m.iloc[::-1].copy()
+        df_graf_m["Motorista_Bold"] = df_graf_m["Motorista"].apply(lambda m: f"<b>{m}</b>")
+        max_tot_m = max(int(df_graf_m["Total"].max()), 1) if not df_graf_m.empty else 1
+        limiar_int_m = max(max_tot_m * 0.055, 1.5)
 
-        altura_m = max(300, min(1500, len(df_graf_m) * 28 + 80))
+        altura_m = max(380, min(2000, len(df_graf_m) * 40 + 110))
         fig_m = go.Figure()
         mapa_cols_faixa = [
-            ("🟢 0–1d", "🟢 0–1 dia", "#22c55e"),
+            ("🟢 0–1d", "🟢 0–1 dia", "#16a34a"),
             ("🟡 2d", "🟡 2 dias", "#eab308"),
             ("🟠 3d", "🟠 3 dias", "#f97316"),
-            ("🔴 4–5d", "🔴 4–5 dias", "#ef4444"),
-            ("🟣 6–10d", "🟣 6–10 dias", "#a855f7"),
-            ("⚫ +10d", "⚫ +10 dias", "#64748b"),
+            ("🔴 4–5d", "🔴 4–5 dias", "#dc2626"),
+            ("🟣 6–10d", "🟣 6–10 dias", "#9333ea"),
+            ("⚫ +10d", "⚫ +10 dias", "#475569"),
         ]
         for col_curta, nome_legenda, cor_barra in mapa_cols_faixa:
             if col_curta in df_graf_m.columns and df_graf_m[col_curta].sum() > 0:
                 fig_m.add_trace(go.Bar(
-                    y=df_graf_m["Motorista"],
+                    y=df_graf_m["Motorista_Bold"],
                     x=df_graf_m[col_curta],
                     name=nome_legenda,
                     orientation="h",
                     marker_color=cor_barra,
-                    text=df_graf_m[col_curta].apply(lambda v: str(int(v)) if v > 0 else ""),
+                    text=df_graf_m[col_curta].apply(lambda v: f"<b>{int(v)}</b>" if v >= limiar_int_m else ""),
                     textposition="inside",
                     insidetextanchor="middle",
+                    textfont=dict(size=14, color="#ffffff", family="Arial Black, Inter, sans-serif"),
                 ))
-        fig_m.update_layout(barmode="stack")
+
+        def _rotulo_ext_m(r):
+            tot_v = int(r.get("Total", 0))
+            crit_v = int(r.get(col_crit_nome, 0))
+            if crit_v > 0:
+                return f"  <b>{tot_v}</b>  <span style='color:#fca5a5'><b>(🔴{crit_v} crít.)</b></span>"
+            return f"  <b>{tot_v}</b>  <span style='color:#86efac'><b>✅</b></span>"
+
+        fig_m.add_trace(go.Scatter(
+            y=df_graf_m["Motorista_Bold"],
+            x=df_graf_m["Total"],
+            mode="text",
+            text=df_graf_m.apply(_rotulo_ext_m, axis=1),
+            textposition="middle right",
+            textfont=dict(size=14, color="#ffffff", family="Inter, Arial, sans-serif"),
+            showlegend=False,
+            hoverinfo="skip",
+            cliponaxis=False,
+        ))
+        fig_m.update_layout(
+            barmode="stack",
+            bargap=0.20,
+            uniformtext=dict(minsize=13, mode="show"),
+            xaxis=dict(
+                range=[0, max_tot_m * 1.32],
+                tickfont=dict(size=13, color="#cbd5e1"),
+                gridcolor="rgba(148, 163, 184, 0.15)",
+                title="",
+            ),
+            yaxis=dict(
+                tickfont=dict(size=14, color="#f8fafc", family="Inter, Arial, sans-serif"),
+                automargin=True,
+                title="",
+            ),
+        )
         st.plotly_chart(
             _layout(fig_m, altura_m),
             use_container_width=True,
@@ -1042,8 +1080,8 @@ def render_aba_backlog(df_base, contexto="", key_prefix="bk"):
                     "format": "png",
                     "filename": f"motoristas_backlog_{(contexto or 'geral').replace(' ', '_')}",
                     "height": altura_m,
-                    "width": 950,
-                    "scale": 2,
+                    "width": 1250,
+                    "scale": 3,
                 }
             },
         )

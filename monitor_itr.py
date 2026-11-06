@@ -383,6 +383,17 @@ def processar_dataframe_itr(df):
         df['Motorista_Limpo'] = df['Driver Name'].apply(resolver_motorista)
     else:
         df['Motorista_Limpo'] = "Não Atribuído"
+
+    def resolver_regiao_motorista(row):
+        m = str(row.get('Driver Name', '')).upper()
+        if 'LOC' in m:
+            return 'LOC'
+        if 'INT' in m:
+            return 'INT'
+        cidade = str(row.get('Destination City', '')).upper()
+        return 'LOC' if 'ITABIRA' in cidade else 'INT'
+
+    df['Regiao_Motorista'] = df.apply(resolver_regiao_motorista, axis=1)
         
     # Classificação de Localidade
     def resolver_tipo_localidade(row):
@@ -610,56 +621,245 @@ def render_aba_rota(df_rota):
 
     st.markdown("<hr style='border-color: #1e293b; margin: 15px 0;'>", unsafe_allow_html=True)
 
-    col_g1, col_g2 = st.columns([4, 6])
-    with col_g1:
+    modo_layout_graf = st.radio(
+        "📐 Visualização dos Gráficos:",
+        ["📸 Modo Print WhatsApp (Tela Cheia / Números Grandes)", "📐 Lado a Lado (Compacto)"],
+        index=0,
+        horizontal=True,
+        key="modo_layout_graf_rota_itr"
+    )
+    tela_cheia = "Modo Print" in modo_layout_graf
+
+    def _render_graf_dist_itr():
         st.markdown("##### 📊 Distribuição do Aging em Rota")
+        tot_dist = max(len(df_rota), 1)
         df_dist = pd.DataFrame({
-            'Faixa': ['D0 (No Prazo)', 'D1 (Atenção)', 'D2 (Alerta)', 'D3+ (Crítico)'],
-            'Volume': [d0, d1, d2, d3]
+            'Faixa': ['<b>D0 (No Prazo)</b>', '<b>D1 (Atenção)</b>', '<b>D2 (Alerta)</b>', '<b>D3+ (Crítico)</b>'],
+            'Volume': [d0, d1, d2, d3],
+            'Rotulo': [
+                f"<b>{v}</b> ({v / tot_dist * 100:.0f}%)" if v > 0 else "<b>0</b>"
+                for v in [d0, d1, d2, d3]
+            ]
         })
+        max_vol_dist = max(int(df_dist['Volume'].max()), 1)
         fig_dist = px.bar(
-            df_dist, x='Faixa', y='Volume', text='Volume',
+            df_dist, x='Faixa', y='Volume', text='Rotulo',
             color='Faixa',
             color_discrete_map={
-                'D0 (No Prazo)': '#22c55e',
-                'D1 (Atenção)': '#eab308',
-                'D2 (Alerta)': '#f97316',
-                'D3+ (Crítico)': '#ef4444'
+                '<b>D0 (No Prazo)</b>': '#16a34a',
+                '<b>D1 (Atenção)</b>': '#eab308',
+                '<b>D2 (Alerta)</b>': '#f97316',
+                '<b>D3+ (Crítico)</b>': '#dc2626'
             }
+        )
+        fig_dist.update_traces(
+            textposition='outside',
+            textfont=dict(size=16, color='#ffffff', family='Arial Black, Inter, sans-serif'),
+            cliponaxis=False
         )
         fig_dist.update_layout(
             template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            margin=dict(t=20, b=20, l=20, r=20),
+            paper_bgcolor="#0f172a",
+            plot_bgcolor="#0f172a",
+            margin=dict(t=35, b=20, l=20, r=20),
             showlegend=False,
-            height=280
+            height=290 if tela_cheia else 320,
+            xaxis=dict(title="", tickfont=dict(size=14, color='#f8fafc')),
+            yaxis=dict(
+                title="Pacotes",
+                range=[0, max_vol_dist * 1.35],
+                tickfont=dict(size=13, color='#cbd5e1'),
+                gridcolor="rgba(148, 163, 184, 0.15)"
+            )
         )
-        st.plotly_chart(fig_dist, use_container_width=True)
+        st.plotly_chart(fig_dist, use_container_width=True, config={
+            'toImageButtonOptions': {
+                'format': 'png',
+                'filename': 'distribuicao_aging_rota_ITR',
+                'height': 420,
+                'width': 900,
+                'scale': 3
+            }
+        })
 
-    with col_g2:
-        st.markdown("##### 👨‍✈️ Volume por Motorista (No Prazo vs Atrasado)")
-        df_mot = df_rota.groupby(['Motorista_Limpo', df_rota['aging'] >= 1]).size().unstack(fill_value=0).reset_index()
-        df_mot.columns = ['Motorista', 'No_Prazo', 'Atrasado'] if len(df_mot.columns) == 3 else ['Motorista', 'No_Prazo']
-        if 'Atrasado' not in df_mot.columns:
-            df_mot['Atrasado'] = 0
-            
-        df_mot['Total'] = df_mot['No_Prazo'] + df_mot['Atrasado']
-        df_mot = df_mot.sort_values(by='Total', ascending=True)
+    def _render_graf_mot_itr():
+        col_c_tit, col_c_reg, col_c_qtd, col_c_ord = st.columns([4, 2, 2, 2])
+        with col_c_tit:
+            st.markdown("##### 👨‍✈️ Entregadores em Rota (Volume vs Prazos)")
+        with col_c_reg:
+            opcoes_reg_graf = ["Todos", "LOC (Local)", "INT (Interior)"]
+            filtro_reg_graf = st.selectbox(
+                "Equipe:",
+                opcoes_reg_graf,
+                key="filtro_reg_graf_rota_itr",
+                label_visibility="collapsed"
+            )
+        with col_c_qtd:
+            opcoes_qtd_graf = ["Top 12", "Top 20", "Top 35", "Todos"]
+            filtro_qtd_graf = st.selectbox(
+                "Quantidade:",
+                opcoes_qtd_graf,
+                index=1,
+                key="filtro_qtd_graf_rota_itr",
+                label_visibility="collapsed"
+            )
+        with col_c_ord:
+            opcoes_ord_graf = ["Maior Volume", "Mais Atrasados", "Menor Volume"]
+            filtro_ord_graf = st.selectbox(
+                "Ordenar:",
+                opcoes_ord_graf,
+                index=0,
+                key="filtro_ord_graf_rota_itr",
+                label_visibility="collapsed"
+            )
 
-        fig_mot = go.Figure()
-        fig_mot.add_trace(go.Bar(y=df_mot['Motorista'], x=df_mot['No_Prazo'], name='No Prazo (D0)', orientation='h', marker_color='#22c55e'))
-        fig_mot.add_trace(go.Bar(y=df_mot['Motorista'], x=df_mot['Atrasado'], name='Em Atraso (≥ D1)', orientation='h', marker_color='#ef4444'))
-        fig_mot.update_layout(
-            barmode='stack',
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            margin=dict(t=20, b=20, l=20, r=20),
-            height=280,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        st.plotly_chart(fig_mot, use_container_width=True)
+        df_rota_chart = df_rota.copy()
+        if filtro_reg_graf == "LOC (Local)" and 'Regiao_Motorista' in df_rota_chart.columns:
+            df_rota_chart = df_rota_chart[df_rota_chart['Regiao_Motorista'] == 'LOC']
+        elif filtro_reg_graf == "INT (Interior)" and 'Regiao_Motorista' in df_rota_chart.columns:
+            df_rota_chart = df_rota_chart[df_rota_chart['Regiao_Motorista'] == 'INT']
+
+        if not df_rota_chart.empty:
+            df_mot = df_rota_chart.groupby(['Motorista_Limpo', df_rota_chart['aging'] >= 1]).size().unstack(fill_value=0).reset_index()
+            df_mot.columns = ['Motorista', 'No_Prazo', 'Atrasado'] if len(df_mot.columns) == 3 else ['Motorista', 'No_Prazo']
+            if 'Atrasado' not in df_mot.columns:
+                df_mot['Atrasado'] = 0
+
+            df_mot['Total'] = df_mot['No_Prazo'] + df_mot['Atrasado']
+
+            if filtro_ord_graf == "Mais Atrasados":
+                df_mot = df_mot.sort_values(by=['Atrasado', 'Total'], ascending=[True, True])
+            elif filtro_ord_graf == "Menor Volume":
+                df_mot = df_mot.sort_values(by=['Total', 'Atrasado'], ascending=[False, False])
+            else:
+                df_mot = df_mot.sort_values(by=['Total', 'Atrasado'], ascending=[True, True])
+
+            if filtro_qtd_graf == "Top 12":
+                df_mot = df_mot.tail(12)
+            elif filtro_qtd_graf == "Top 20":
+                df_mot = df_mot.tail(20)
+            elif filtro_qtd_graf == "Top 35":
+                df_mot = df_mot.tail(35)
+
+            max_tot = max(int(df_mot['Total'].max()), 1)
+            limiar_interno = max(max_tot * 0.055, 1.5)
+            df_mot['Motorista_Bold'] = df_mot['Motorista'].apply(lambda m: f"<b>{m}</b>")
+
+            def _rotulo_externo(r):
+                tot = int(r['Total'])
+                np_v = int(r['No_Prazo'])
+                at_v = int(r['Atrasado'])
+                if at_v > 0 and np_v > 0:
+                    return f"  <b>{tot}</b>  <span style='color:#86efac'><b>🟢{np_v}</b></span> <span style='color:#fca5a5'><b>🔴{at_v}</b></span>"
+                elif at_v > 0:
+                    return f"  <b>{tot}</b>  <span style='color:#fca5a5'><b>🔴{at_v} atr.</b></span>"
+                return f"  <b>{tot}</b>  <span style='color:#86efac'><b>✅ D0</b></span>"
+
+            rotulos_externos = df_mot.apply(_rotulo_externo, axis=1)
+            altura_grafico = max(380, min(2000, len(df_mot) * 42 + 125))
+
+            tot_c = len(df_rota_chart)
+            d0_c = len(df_rota_chart[df_rota_chart['aging'] == 0])
+            atr_c = len(df_rota_chart[df_rota_chart['aging'] >= 1])
+            agora_graf = datetime.now().strftime("%d/%m %H:%M")
+
+            fig_mot = go.Figure()
+            fig_mot.add_trace(go.Bar(
+                y=df_mot['Motorista_Bold'],
+                x=df_mot['No_Prazo'],
+                name='🟢 No Prazo (D0)',
+                orientation='h',
+                marker_color='#16a34a',
+                text=df_mot['No_Prazo'].apply(lambda v: f"<b>{int(v)}</b>" if v >= limiar_interno else ''),
+                textposition='inside',
+                insidetextanchor='middle',
+                textfont=dict(size=15, color='#ffffff', family='Arial Black, Inter, sans-serif')
+            ))
+            fig_mot.add_trace(go.Bar(
+                y=df_mot['Motorista_Bold'],
+                x=df_mot['Atrasado'],
+                name='🔴 Em Atraso (≥ D1)',
+                orientation='h',
+                marker_color='#dc2626',
+                text=df_mot['Atrasado'].apply(lambda v: f"<b>{int(v)}</b>" if v >= limiar_interno else ''),
+                textposition='inside',
+                insidetextanchor='middle',
+                textfont=dict(size=15, color='#ffffff', family='Arial Black, Inter, sans-serif')
+            ))
+            fig_mot.add_trace(go.Scatter(
+                y=df_mot['Motorista_Bold'],
+                x=df_mot['Total'],
+                mode='text',
+                text=rotulos_externos,
+                textposition='middle right',
+                textfont=dict(size=15, color='#ffffff', family='Inter, Arial, sans-serif'),
+                showlegend=False,
+                hoverinfo='skip',
+                cliponaxis=False
+            ))
+            fig_mot.update_layout(
+                barmode='stack',
+                bargap=0.20,
+                uniformtext=dict(minsize=14, mode='show'),
+                template="plotly_dark",
+                paper_bgcolor="#0f172a",
+                plot_bgcolor="#0f172a",
+                title=dict(
+                    text=(
+                        f"<b>🚚 AGING EM ROTA — BASE ITR ({filtro_reg_graf}) • {agora_graf}</b>"
+                        f"<br><span style='font-size:13px;color:#cbd5e1;'>"
+                        f"📦 Total: <b>{tot_c}</b> pac.  |  🟢 No Prazo (D0): <b>{d0_c}</b>  |  🔴 Em Atraso (≥ D1): <b>{atr_c}</b>"
+                        f"</span>"
+                    ),
+                    x=0.01,
+                    y=0.98,
+                    font=dict(size=16, color='#f8fafc', family='Inter, Arial, sans-serif')
+                ),
+                margin=dict(t=75, b=20, l=15, r=30),
+                height=altura_grafico,
+                xaxis=dict(
+                    range=[0, max_tot * 1.36],
+                    tickfont=dict(size=13, color='#cbd5e1'),
+                    gridcolor="rgba(148, 163, 184, 0.15)",
+                    title=""
+                ),
+                yaxis=dict(
+                    tickfont=dict(size=14, color='#f8fafc', family='Inter, Arial, sans-serif'),
+                    automargin=True,
+                    title=""
+                ),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.01,
+                    xanchor="right",
+                    x=1,
+                    font=dict(size=13, color='#f8fafc')
+                )
+            )
+            st.plotly_chart(fig_mot, use_container_width=True, config={
+                'toImageButtonOptions': {
+                    'format': 'png',
+                    'filename': f'aging_rota_ITR_{filtro_reg_graf}',
+                    'height': altura_grafico,
+                    'width': 1250,
+                    'scale': 3
+                }
+            })
+            st.caption("📸 **Para mandar no WhatsApp:** Clique no ícone da câmera 📷 no canto superior direito do gráfico para baixar em **Alta Definição (3x)** ou tire print direto da tela.")
+        else:
+            st.info(f"Nenhum motorista {filtro_reg_graf} em rota no momento.")
+
+    if tela_cheia:
+        _render_graf_mot_itr()
+        with st.expander("📊 Ver Gráfico de Distribuição por Faixa (D0, D1, D2, D3+)", expanded=False):
+            _render_graf_dist_itr()
+    else:
+        col_g1, col_g2 = st.columns([3.5, 6.5])
+        with col_g1:
+            _render_graf_dist_itr()
+        with col_g2:
+            _render_graf_mot_itr()
 
     st.markdown("#### 🔍 Filtros da Rota")
     f_col1, f_col2, f_col3, f_col4 = st.columns([2, 2, 2, 3])
