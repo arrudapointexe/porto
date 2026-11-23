@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 import sys
 import unicodedata
@@ -524,9 +524,25 @@ def baixar_inventario_imile(page, sigla):
     # O ícone de download na barra de navegação superior
     page.locator('span.Imile-ButtonIcon-root svg path[d*="M8 0C3.57"]').locator('..').first.click(force=True)
 
-    # Espera o último botão de download aparecer na lista
-    btn_baixar = page.locator('button:has-text("download")').last
-    btn_baixar.wait_for(state="visible", timeout=30000)
+    # Espera o último botão de download aparecer na lista (compatível com layout antigo e novo drawer da iMile)
+    btn_baixar = page.locator('button:has-text("download"), button:has-text("Baixar")').last
+    try:
+        btn_baixar.wait_for(state="visible", timeout=25000)
+    except Exception:
+        print(f"[{sigla}] WARN: Botão texto 'download' não visível no drawer. Tentando ícone circular de download do primeiro item concluído...")
+        seletores_icone_drawer = [
+            '.ant-drawer-body svg',
+            '[class*="drawer"] [class*="download"]',
+            '[class*="export"] svg',
+        ]
+        btn_baixar = None
+        for sel in seletores_icone_drawer:
+            loc = page.locator(sel)
+            if loc.count() >= 2:
+                btn_baixar = loc.nth(1)
+                break
+        if btn_baixar is None:
+            raise TimeoutError(f"[{sigla}] Botão de download não encontrado na central de downloads.")
 
     # Inicia o download
     print(f"[{sigla}] INFO: Baixando o arquivo de inventário...")
@@ -605,6 +621,22 @@ def consolidar_calcular_e_salvar(lista_dfs, caminho_destino):
         df_final.rename(columns={target_col_name: 'aging'}, inplace=True)
         df_final['aging'] = aging_values
         print("INFO: Coluna 'aging' calculada com sucesso.")
+
+    # --- Proteção contra perda de base em caso de falha parcial (ex: ITR falhar no download) ---
+    bases_coletadas = set(df_final['Base'].dropna().astype(str).str.strip().str.upper().unique()) if 'Base' in df_final.columns else set()
+    bases_esperadas = {str(b[0]).strip().upper() for b in BASES_SLA if b and b[0]}
+    bases_faltantes = bases_esperadas - bases_coletadas
+
+    if bases_faltantes and os.path.exists(caminho_destino):
+        try:
+            df_anterior = pd.read_excel(caminho_destino)
+            if 'Base' in df_anterior.columns:
+                df_preservado = df_anterior[df_anterior['Base'].astype(str).str.strip().str.upper().isin(bases_faltantes)].copy()
+                if not df_preservado.empty:
+                    print(f"WARN: Preservando {len(df_preservado)} registros anteriores de {sorted(bases_faltantes)} pois a coleta falhou nesta rodada.")
+                    df_final = pd.concat([df_final, df_preservado], ignore_index=True)
+        except Exception as e_pres:
+            print(f"WARN: Não foi possível recuperar bases anteriores de '{caminho_destino}': {e_pres}")
 
     # --- Salvamento Final ---
     try:

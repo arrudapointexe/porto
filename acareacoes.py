@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import urllib.parse
+from datetime import datetime, timedelta
 import pandas as pd
 import re
 from dotenv import load_dotenv
@@ -43,6 +45,133 @@ def eh_subtipo_ignorado(valor) -> bool:
 
 def normalizar_codigo(codigo):
     return str(codigo or "").strip().replace(" ", "")
+
+
+def formatar_prazo_acareacao(prazo_planilha):
+    prazo_texto = str(prazo_planilha or "").strip()
+    if not prazo_texto or prazo_texto.lower() in ['nan', 'none', 'n/a']:
+        amanha = datetime.now() + timedelta(days=1)
+        return amanha.strftime("%d/%m/%Y") + " 14:00"
+
+    try:
+        try:
+            prazo_dt = datetime.strptime(prazo_texto, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            prazo_dt = datetime.strptime(prazo_texto[:16], "%Y-%m-%d %H:%M")
+
+        prazo_ajustado = prazo_dt - timedelta(hours=2)
+        hora = prazo_ajustado.hour
+
+        if hora >= 16 or hora < 6:
+            return prazo_ajustado.strftime("%d/%m/%Y") + " 14:00"
+        return prazo_ajustado.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return datetime.now().strftime("%d/%m/%Y") + " 14:00"
+
+
+def gerar_url_whatsapp_acareacao(row, sigla_base):
+    awb = str(row.get('AWB', '')).strip()
+    num_ref = str(row.get('Número de Referência', '')).strip()
+    ref_texto = num_ref if (num_ref and num_ref.lower() not in ['nan', 'none', 'n/a', '-']) else "N/A"
+    prazo_texto = formatar_prazo_acareacao(row.get('Prazo do Processo', ''))
+    produto_bruto = str(row.get('Produto', 'N/A')).strip()
+    telefone = str(row.get('Telefone', 'N/A')).strip()
+    valor = str(row.get('Valor', '0.00')).strip()
+    endereco_bruto = str(row.get('Endereco', 'N/A')).strip()
+    url_site = os.getenv("URL_SITE", "https://imileacarea.streamlit.app")
+
+    def _montar_url(lim_prod, lim_end):
+        prod = (produto_bruto[:lim_prod] + "...") if len(produto_bruto) > lim_prod else produto_bruto
+        end = (endereco_bruto[:lim_end] + "...") if len(endereco_bruto) > lim_end else endereco_bruto
+        texto_gerado = f"""🚨 *Acareação iMile Pendente* 🚨
+
+📦 *Código:* {awb}
+📄 *Nº de Referência:* {ref_texto}
+🏷️ *Produto:* {prod}
+💰 *Valor:* R$ {valor}
+📞 *Telefone:* {telefone}
+📍 *Endereço:* {end}
+
+⏰ *FINALIZAR ATÉ:* {prazo_texto}
+
+*Como responder esta acareação:*
+Acesse o portal do motorista pelo link abaixo e envie o seu comprovante (print ou foto do protocolo):
+🌐 *Link do Portal:* {url_site}/?base={sigla_base}
+
+*Regras para o Comprovante:*
+1️⃣ *Print do WhatsApp:* A conversa com o cliente deve confirmar o recebimento (com código do pedido, nome e telefone). O contato NÃO pode estar salvo na sua agenda e o número deve ser o mesmo do sistema (No formato +55 xx xxxx-xxxx).
+2️⃣ *Protocolo Escrito:* Preencha todos os dados corretamente (pegue impresso na base). O cabeçalho NÃO pode ser preenchido pelo cliente. É obrigatória uma foto da folha do protocolo e outra da folha com a fachada atrás.
+
+⚠️ *ATENÇÃO:* Caso não seja respondido no prazo e da forma correta, o pacote será dado como extraviado em seu nome + MULTA de R$100,00 por baixa indevida. O valor será descontado!"""
+        return f"https://wa.me/?text={urllib.parse.quote(texto_gerado, safe='*:/(),.-_~')}"
+
+    lim_prod, lim_end = 100, 140
+    url = _montar_url(lim_prod, lim_end)
+    while len(url) > 2000 and (lim_prod > 20 or lim_end > 30):
+        lim_prod = max(20, lim_prod - 15)
+        lim_end = max(30, lim_end - 20)
+        url = _montar_url(lim_prod, lim_end)
+    return url
+
+
+def enviar_resumo_acareacoes_telegram(bot, chat_id, df_final, sigla):
+    if not bot or not chat_id or df_final is None or df_final.empty:
+        return
+
+    contagem_motoristas = df_final['Motorista'].value_counts()
+    msg_resumo = f"🚚 *MOTORISTAS COM ACAREAÇÕES - {sigla}*\n\n"
+    botoes_wpp = []
+
+    try:
+        from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+    except Exception:
+        InlineKeyboardMarkup = None
+        InlineKeyboardButton = None
+
+    for mot_completo, qtd in contagem_motoristas.items():
+        nome_limpo = re.sub(r'\(.*?\)', '', str(mot_completo)).strip()
+        nome_limpo = nome_limpo.split('-')[0].strip()
+        primeiro_nome = nome_limpo.split(' ')[0].strip().upper() or "MOTORISTA"
+        if primeiro_nome == "-":
+            primeiro_nome = "MOTORISTA"
+
+        msg_resumo += f"👤 {primeiro_nome}: {qtd} pacote(s)\n"
+
+        if InlineKeyboardButton is not None:
+            df_mot_rows = df_final[df_final['Motorista'] == mot_completo]
+            for _, r_pac in df_mot_rows.iterrows():
+                awb_pac = str(r_pac.get('AWB', '')).strip()
+                url_wpp = gerar_url_whatsapp_acareacao(r_pac, sigla)
+                botoes_wpp.append(
+                    InlineKeyboardButton(
+                        text=f"📲 Whats {primeiro_nome} — {awb_pac}",
+                        url=url_wpp
+                    )
+                )
+
+    msg_resumo += f"\n📦 *Total: {len(df_final)} acareação(ões)*"
+    if botoes_wpp:
+        msg_resumo += "\n\n👇 *Clique abaixo para enviar a mensagem pronta no WhatsApp:*"
+
+    # O limite do Telegram para reply_markup é ~10 KB (10240 bytes) por mensagem.
+    # Como cada URL tem ~1.9 KB, enviamos em lotes de até 4 botões por mensagem (~7.6 KB).
+    TAMANHO_LOTE = 4
+    if InlineKeyboardMarkup is not None and botoes_wpp:
+        lotes = [botoes_wpp[i:i + TAMANHO_LOTE] for i in range(0, len(botoes_wpp), TAMANHO_LOTE)]
+        total_lotes = len(lotes)
+        for idx, lote in enumerate(lotes):
+            markup = InlineKeyboardMarkup(row_width=1)
+            for btn in lote:
+                markup.add(btn)
+            texto_envio = msg_resumo if idx == 0 else f"📲 *Botões WhatsApp - {sigla} ({idx + 1}/{total_lotes}):*"
+            try:
+                bot.send_message(chat_id, texto_envio, parse_mode="Markdown", reply_markup=markup)
+            except Exception as e:
+                print(f"[{sigla}] Erro ao enviar lote {idx + 1} de botões WhatsApp: {e}")
+                if idx == 0:
+                    bot.send_message(chat_id, msg_resumo, parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id, msg_resumo, parse_mode="Markdown")
 
 
 def extrair_awbs_da_planilha(valores):
@@ -667,21 +796,10 @@ def rodar_automacao_acareacao(sigla, usuario, senha, bot=None, chat_id=None, mod
                 enviar_para_google_sheets(df_final, sigla, bot, chat_id, awbs_ativos=awbs_ativos)
                 
                 # ==========================================
-                # MENSAGEM COM O RESUMO DOS MOTORISTAS (LIMPO)
+                # MENSAGEM COM O RESUMO DOS MOTORISTAS (LIMPO) + BOTÕES WHATSAPP
                 # ==========================================
                 if bot and chat_id:
-                    contagem_motoristas = df_final['Motorista'].value_counts()
-                    msg_resumo = f"🚚 *MOTORISTAS COM ACAREAÇÕES - {sigla}*\n\n"
-                    
-                    for mot_completo, qtd in contagem_motoristas.items():
-                        nome_limpo = re.sub(r'\(.*?\)', '', str(mot_completo)).strip()
-                        nome_limpo = nome_limpo.split('-')[0].strip()
-                        primeiro_nome = nome_limpo.split(' ')[0].strip().upper()
-                        
-                        msg_resumo += f"👤 {primeiro_nome}: {qtd} pacote(s)\n"
-                        
-                    msg_resumo += f"\n📦 *Total: {len(df_final)} acareação(ões)*"
-                    bot.send_message(chat_id, msg_resumo, parse_mode="Markdown")
+                    enviar_resumo_acareacoes_telegram(bot, chat_id, df_final, sigla)
                 
                 return nome_arquivo
             else:

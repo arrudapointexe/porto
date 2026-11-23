@@ -12,7 +12,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import sync_time_patch  #offset time do googlinho
 
-load_dotenv()
+DIRETORIO_BASE_BOT = os.path.dirname(os.path.abspath(__file__))
+try:
+    os.chdir(DIRETORIO_BASE_BOT)
+except Exception:
+    pass
+load_dotenv(os.path.join(DIRETORIO_BASE_BOT, ".env"))
 
 #omports
 from gerar_perdas import extrair_relatorio_diario_completo
@@ -66,7 +71,9 @@ def executar_fluxo_arrival(sigla, usuario, senha, chat_id):
 
 #acareações e resumo
 def executar_fluxo_acareacao(sigla, usuario, senha, chat_id):
-    arquivo_gerado = rodar_automacao_acareacao(sigla, usuario, senha, bot, chat_id)
+    import importlib, acareacoes
+    importlib.reload(acareacoes)
+    arquivo_gerado = acareacoes.rodar_automacao_acareacao(sigla, usuario, senha, bot, chat_id)
     
     if arquivo_gerado and os.path.exists(arquivo_gerado):
         try:
@@ -78,7 +85,9 @@ def executar_fluxo_acareacao(sigla, usuario, senha, chat_id):
         bot.send_message(chat_id, f"✅ Processo de acareação da {sigla} finalizado, mas nenhum dado novo precisou ser salvo.")
 
 def executar_fluxo_acareacao_incremental(sigla, usuario, senha, chat_id):
-    arquivo_gerado = rodar_automacao_acareacao_incremental(sigla, usuario, senha, bot, chat_id)
+    import importlib, acareacoes
+    importlib.reload(acareacoes)
+    arquivo_gerado = acareacoes.rodar_automacao_acareacao_incremental(sigla, usuario, senha, bot, chat_id)
     
     if arquivo_gerado and os.path.exists(arquivo_gerado):
         try:
@@ -268,6 +277,10 @@ def command_vencimento(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ocorreu um erro ao gerar as tabelas: {e}")
 
+@bot.message_handler(commands=['vencimentos_whatsapp', 'teste_wpp'])
+def command_vencimentos_whatsapp(message):
+    bot.reply_to(message, "🚀 Iniciando disparo de Vencimentos Shopee e Aging iMile para o WhatsApp...")
+    threading.Thread(target=rotina_automatica_vencimentos_shopee, daemon=True).start()
 
     #sla 
 @bot.message_handler(commands=['bd_manha'])
@@ -424,7 +437,9 @@ def acarea_todas(message):
             return sigla, None
         bot.send_message(chat_id, f"⏳ *A iniciar base: {sigla} (Login: {usuario})*...", parse_mode="Markdown")
         try:
-            caminho_file = rodar_automacao_acareacao(sigla, usuario, senha, bot, chat_id)
+            import importlib, acareacoes
+            importlib.reload(acareacoes)
+            caminho_file = acareacoes.rodar_automacao_acareacao(sigla, usuario, senha, bot, chat_id)
             return sigla, caminho_file
         except Exception as e:
             bot.send_message(chat_id, f"❌ Erro ao processar a base {sigla}: {e}")
@@ -587,6 +602,71 @@ def rotina_automatica_atualizar_latencia_20m():
     import threading
     threading.Thread(target=_run, daemon=True).start()
 
+def rotina_automatica_vencimentos_shopee():
+    import requests
+    bot.send_message(CHAT_ID_ALVO, "⏰ *HORÁRIO ATINGIDO! Iniciando Vencimentos Shopee e Aging iMile (Enviando para WhatsApp)...*", parse_mode="Markdown")
+    
+    from config import CHAT_ID_GP_JML, CHAT_ID_GP_SNB
+    
+    def send_to_whatsapp(chat_id, img_path, caption=""):
+        try:
+            abs_path = os.path.abspath(img_path)
+            requests.post('http://localhost:3001/send_image', json={
+                "chatId": chat_id,
+                "imagePath": abs_path,
+                "caption": caption
+            })
+        except Exception as e:
+            bot.send_message(CHAT_ID_ALVO, f"❌ Erro na API do WhatsApp: {e}")
+
+    def send_text_to_whatsapp(chat_id, text):
+        try:
+            requests.post('http://localhost:3001/send_message', json={
+                "chatId": chat_id,
+                "message": text
+            })
+        except Exception as e:
+            bot.send_message(CHAT_ID_ALVO, f"❌ Erro na API do WhatsApp: {e}")
+
+    # 1. Aging iMile
+    try:
+        from gerar_vencimentos import gerar_imagens_vencimentos
+        imagens_aging, msg_aging = gerar_imagens_vencimentos()
+        if imagens_aging:
+            for img in imagens_aging:
+                if not os.path.exists(img): continue
+                
+                chat_destino = CHAT_ID_GP_JML
+                if "ITR" in img or "Santa_Barbara" in img:
+                    chat_destino = CHAT_ID_GP_SNB
+                
+                send_to_whatsapp(chat_destino, img)
+    except Exception as e:
+        bot.send_message(CHAT_ID_ALVO, f"❌ Erro na rotina automática de aging (WhatsApp): {e}")
+
+    # 2. Shopee
+    try:
+        caminho_forward = baixar_planilha_shopee()
+        if caminho_forward and os.path.exists(caminho_forward):
+            mapa_ceps = carregar_dicionario_ceps("base_ceps.xlsx")
+            mensagens_shopee, imagens_shopee = gerar_relatorio_shopee(caminho_forward, mapa_ceps)
+            
+            for i, img in enumerate(imagens_shopee):
+                if not os.path.exists(img): continue
+                
+                chat_destino = CHAT_ID_GP_JML
+                if "Barao_SB_Catas" in img:
+                    chat_destino = CHAT_ID_GP_SNB
+                
+                caption = mensagens_shopee[i] if i < len(mensagens_shopee) else ""
+                send_to_whatsapp(chat_destino, img, caption)
+            
+            if len(mensagens_shopee) > len(imagens_shopee):
+                for aviso in mensagens_shopee[len(imagens_shopee):]:
+                    send_text_to_whatsapp(CHAT_ID_GP_JML, aviso)
+    except Exception as e:
+        bot.send_message(CHAT_ID_ALVO, f"❌ Erro na rotina automática da shopee (WhatsApp): {e}")
+
 def relogio_do_bot():
     while True:
         schedule.run_pending()
@@ -606,6 +686,10 @@ schedule.every().day.at("15:00").do(rotina_automatica_sla)
 schedule.every().day.at("18:00").do(rotina_automatica_sla)
 schedule.every().day.at("21:00").do(rotina_automatica_sla)
 
+horarios_vencimentos = ["12:00", "13:30", "15:00", "16:30", "18:00", "19:30", "21:00"]
+for hr in horarios_vencimentos:
+    schedule.every().day.at(hr).do(rotina_automatica_vencimentos_shopee)
+
 schedule.every(20).minutes.do(rotina_automatica_atualizar_latencia_20m)
 
 
@@ -615,5 +699,11 @@ schedule.every(20).minutes.do(rotina_automatica_atualizar_latencia_20m)
 threading.Thread(target=relogio_do_bot, daemon=True).start()
 print("⏰ Relógio interno ativado! Rotinas agendadas.")
 print("🤖 Bot iniciado e aguardando comandos manuais...")
+
+try:
+    bot.remove_webhook()
+    print("✅ Webhook removido com sucesso (se existia).")
+except Exception as e:
+    print(f"⚠️ Erro ao remover webhook: {e}")
 
 bot.infinity_polling()

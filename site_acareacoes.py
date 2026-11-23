@@ -23,18 +23,22 @@ st.set_page_config(page_title="Gestão de Acareações", layout="wide", page_ico
 # ==============================================================
 # CONFIGURAÇÕES E SECRETS
 # ==============================================================
+URL_WEBHOOK_PADRAO = "https://script.google.com/macros/s/AKfycbxxI0is8bSiwhlLl17qWrKB2X2Q5wuEqdrsBaahqFhNzV5gmW1j_0toMLPVB_xmP4eU/exec"
 try:
     NUMERO_BASE = st.secrets.get("NUMERO_BASE", "5531971463005")
     NUMERO_BASE_CTG = st.secrets.get("NUMERO_BASE_CTG", NUMERO_BASE) 
     NOME_PLANILHA = st.secrets.get("NOME_PLANILHA", "acareaBase")
-    URL_WEBHOOK_DRIVE = st.secrets.get("URL_WEBHOOK_DRIVE", "")
+    URL_WEBHOOK_DRIVE = st.secrets.get("URL_WEBHOOK_DRIVE", URL_WEBHOOK_PADRAO)
     URL_SITE = st.secrets.get("URL_SITE", "https://imileacarea.streamlit.app")
 except:
     NUMERO_BASE = os.getenv("NUMERO_BASE", "5531971463005")
     NUMERO_BASE_CTG = os.getenv("NUMERO_BASE_CTG", NUMERO_BASE)
     NOME_PLANILHA = os.getenv("NOME_PLANILHA", "acareaBase")
-    URL_WEBHOOK_DRIVE = os.getenv("URL_WEBHOOK_DRIVE", "")
+    URL_WEBHOOK_DRIVE = os.getenv("URL_WEBHOOK_DRIVE", URL_WEBHOOK_PADRAO)
     URL_SITE = os.getenv("URL_SITE", "https://imileacarea.streamlit.app")
+
+if not URL_WEBHOOK_DRIVE or "AKfycbw5jfWjFhxEatj1JhrZlPbs_0H5grj7F7zBZJjdLAZ9K7gyM2R1M_IY1OhkxccuS0FF" in str(URL_WEBHOOK_DRIVE):
+    URL_WEBHOOK_DRIVE = URL_WEBHOOK_PADRAO
 
 # 🔥 CORREÇÃO 1: As bases da rede em ordem alfabética
 BASES_DISPONIVEIS = ["BIM", "CPH", "CTG", "CTP", "GNH", "GVR", "ITR", "JML", "MNT", "QHG", "RBN", "SNB", "TFO"]
@@ -97,7 +101,8 @@ def formatar_prazo(prazo_planilha):
         return datetime.now().strftime("%d/%m/%Y") + " 14:00"
 
 def upload_para_drive(arquivo_foto, nome_arquivo):
-    if not URL_WEBHOOK_DRIVE:
+    url_webhook = str(URL_WEBHOOK_DRIVE or "").strip().strip('"').strip("'")
+    if not url_webhook:
         st.error("URL do Webhook do Google Apps Script não configurada.")
         return None
     try:
@@ -110,8 +115,18 @@ def upload_para_drive(arquivo_foto, nome_arquivo):
             "base64": base64_img
         }
 
-        resposta = requests.post(URL_WEBHOOK_DRIVE, json=payload)
-        resultado = resposta.json()
+        resposta = requests.post(url_webhook, json=payload, timeout=30)
+        if resposta.status_code == 404:
+            st.error("Erro 404 no Webhook do Drive: o projeto/implantação do Google Apps Script não foi encontrado (verifique se o script foi excluído da sua conta Google ou se a URL_WEBHOOK_DRIVE mudou).")
+            return None
+
+        try:
+            resultado = resposta.json()
+        except ValueError:
+            trecho = re.sub(r"<[^>]+>", " ", resposta.text or "")
+            trecho = re.sub(r"\s+", " ", trecho).strip()[:200]
+            st.error(f"Resposta inválida do Webhook do Drive (HTTP {resposta.status_code}): {trecho}")
+            return None
 
         if resultado.get("status") == "success":
             return resultado.get("id")
